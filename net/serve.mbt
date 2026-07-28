@@ -51,12 +51,12 @@ async fn drive(conn : @socket.Tcp, engine : @moonrpc.H2Server) -> Unit {
 }
 
 ///|
-/// A gRPC server: a registry of unary handlers keyed by `/pkg.Service/Method`
-/// path, served over the self-built HTTP/2 (h2c) transport. Each accepted
-/// connection gets its own `@moonrpc.H2Server` engine (HPACK and flow control are
-/// per-connection state).
+/// A gRPC server: a registry of handlers keyed by `/pkg.Service/Method` path,
+/// served over the self-built HTTP/2 (h2c) transport. Handlers may be any of the
+/// four gRPC call kinds. Each accepted connection gets its own `@moonrpc.H2Server`
+/// engine (HPACK and flow control are per-connection state).
 pub(all) struct GrpcServer {
-  handlers : Map[String, (Bytes) -> Bytes]
+  handlers : Map[String, @moonrpc.Handler]
 }
 
 ///|
@@ -73,7 +73,39 @@ pub fn GrpcServer::register(
   path : String,
   handler : (Bytes) -> Bytes,
 ) -> Unit {
-  self.handlers[path] = handler
+  self.handlers[path] = Unary((_ctx, req) => handler(req))
+}
+
+///|
+/// Register a server-streaming handler: one request message in, an ordered
+/// sequence of reply messages out.
+pub fn GrpcServer::register_server_streaming(
+  self : GrpcServer,
+  path : String,
+  handler : (@moonrpc.RpcContext, Bytes) -> Array[Bytes],
+) -> Unit {
+  self.handlers[path] = ServerStreaming(handler)
+}
+
+///|
+/// Register a client-streaming handler: every request message is collected, and
+/// after the client half-closes the handler returns one reply.
+pub fn GrpcServer::register_client_streaming(
+  self : GrpcServer,
+  path : String,
+  handler : (@moonrpc.RpcContext, Array[Bytes]) -> Bytes,
+) -> Unit {
+  self.handlers[path] = ClientStreaming(handler)
+}
+
+///|
+/// Register a bidirectional-streaming handler.
+pub fn GrpcServer::register_bidi(
+  self : GrpcServer,
+  path : String,
+  factory : (@moonrpc.RpcContext) -> @moonrpc.BidiHandler,
+) -> Unit {
+  self.handlers[path] = Bidi(factory)
 }
 
 ///|
@@ -81,7 +113,7 @@ pub fn GrpcServer::register(
 fn GrpcServer::engine(self : GrpcServer) -> @moonrpc.H2Server {
   let e = @moonrpc.H2Server::new()
   for path, handler in self.handlers {
-    e.register(path, handler)
+    e.register_handler(path, handler)
   }
   e
 }
@@ -225,6 +257,187 @@ async test "an unregistered method is served UNIMPLEMENTED over h2c" {
       "127.0.0.1", 50072, b"/echo.Echo/Missing", b"x",
     )
     assert_eq(grpc_status == b"12", true)
+    task.cancel()
+  })
+}
+
+///|
+/// Split a run of concatenated length-prefixed gRPC messages into their payloads.
+fn split_messages(data : Bytes) -> Array[Bytes] {
+  let out : Array[Bytes] = []
+  let mut off = 0
+  while data.length() - off >= 5 {
+    let len = (data[off + 1].to_int() << 24) |
+      (data[off + 2].to_int() << 16) |
+      (data[off + 3].to_int() << 8) |
+      data[off + 4].to_int()
+    if data.length() - off < 5 + len {
+      break
+    }
+    out.push(data[off + 5:off + 5 + len].to_owned())
+    off = off + 5 + len
+  }
+  out
+}
+
+///|
+/// A streaming in-process h2c gRPC client: it opens one stream, sends every
+/// message in `requests` as its own length-prefixed DATA (the last carrying
+/// END_STREAM, or END_STREAM on the HEADERS when there are none), then reads the
+/// whole response, reassembling the reply messages in order and returning
+/// `(:status, grpc-status, [reply messages])`. Drives both server- and
+/// client-streaming (and the bidi collect-all case).
+async fn streaming_call(
+  host : String,
+  port : Int,
+  path : Bytes,
+  requests : Array[Bytes],
+) -> (Bytes, Bytes, Array[Bytes]) {
+  let conn = @socket.Tcp::connect(
+    @socket.Addr::parse(host + ":" + port.to_string()),
+  )
+  conn.write(@moonrpc.connection_preface)
+  conn.write(@moonrpc.Frame::Settings(params=[], ack=false).encode())
+  let enc = @moonrpc.HpackEncoder::new()
+  let block = enc.encode([
+    { name: b":method", value: b"POST" },
+    { name: b":scheme", value: b"http" },
+    { name: b":path", value: path },
+    { name: b":authority", value: b"127.0.0.1" },
+    { name: b"content-type", value: b"application/grpc" },
+    { name: b"te", value: b"trailers" },
+  ])
+  let n = requests.length()
+  conn.write(
+    @moonrpc.Frame::Headers(
+      stream_id=1,
+      fragment=block,
+      end_stream=n == 0,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ).encode(),
+  )
+  for i = 0; i < n; i = i + 1 {
+    conn.write(
+      @moonrpc.Frame::Data(
+        stream_id=1,
+        data=@moonrpc.encode_message(requests[i]),
+        end_stream=i == n - 1,
+        padding=0,
+      ).encode(),
+    )
+  }
+  let dec = @moonrpc.HpackDecoder::new()
+  let acc = @buffer.Buffer()
+  let mut status = b""
+  let mut grpc_status = b""
+  let mut done = false
+  while !done {
+    let frame = read_frame(conn)
+    match frame {
+      Settings(ack~, ..) =>
+        if !ack {
+          conn.write(@moonrpc.Frame::Settings(params=[], ack=true).encode())
+        }
+      Headers(fragment~, end_stream~, ..) => {
+        for h in dec.decode(fragment) {
+          if h.name == b":status" {
+            status = h.value
+          }
+          if h.name == b"grpc-status" {
+            grpc_status = h.value
+          }
+        }
+        if end_stream {
+          done = true
+        }
+      }
+      Data(data~, ..) => acc.write_bytes(data)
+      _ => ()
+    }
+  }
+  conn.close()
+  (status, grpc_status, split_messages(acc.to_bytes()))
+}
+
+///|
+async test "server-streaming: a real h2c call receives multiple framed replies in order" {
+  @async.with_task_group(g => {
+    let server = GrpcServer::new()
+    server.register_server_streaming("/count.C/Up", (_ctx, req) => {
+      [cat(req, b"-1"), cat(req, b"-2"), cat(req, b"-3")]
+    })
+    let task = g.spawn(() => server.serve(port=50073))
+    @async.sleep(300)
+    let (status, grpc_status, replies) = streaming_call(
+      "127.0.0.1",
+      50073,
+      b"/count.C/Up",
+      [b"n"],
+    )
+    assert_eq(status == b"200", true)
+    assert_eq(grpc_status == b"0", true)
+    assert_eq(replies.length(), 3)
+    assert_eq(replies[0] == b"n-1", true)
+    assert_eq(replies[1] == b"n-2", true)
+    assert_eq(replies[2] == b"n-3", true)
+    task.cancel()
+  })
+}
+
+///|
+async test "client-streaming: a real h2c call sends many messages and gets one reply" {
+  @async.with_task_group(g => {
+    let server = GrpcServer::new()
+    server.register_client_streaming("/sum.S/Add", (_ctx, msgs) => {
+      let buf = @buffer.Buffer()
+      buf.write_bytes(b"got")
+      for m in msgs {
+        buf.write_byte(b'/')
+        buf.write_bytes(m)
+      }
+      buf.to_bytes()
+    })
+    let task = g.spawn(() => server.serve(port=50074))
+    @async.sleep(300)
+    let (status, grpc_status, replies) = streaming_call(
+      "127.0.0.1",
+      50074,
+      b"/sum.S/Add",
+      [b"a", b"b", b"c"],
+    )
+    assert_eq(status == b"200", true)
+    assert_eq(grpc_status == b"0", true)
+    assert_eq(replies.length(), 1)
+    assert_eq(replies[0] == b"got/a/b/c", true)
+    task.cancel()
+  })
+}
+
+///|
+async test "bidi-streaming: a real h2c call echoes each message and closes with a farewell" {
+  @async.with_task_group(g => {
+    let server = GrpcServer::new()
+    server.register_bidi("/chat.C/Echo", _ctx => @moonrpc.BidiHandler::{
+      on_message: m => [cat(b"re:", m)],
+      on_end: () => [b"bye"],
+    })
+    let task = g.spawn(() => server.serve(port=50075))
+    @async.sleep(300)
+    let (status, grpc_status, replies) = streaming_call(
+      "127.0.0.1",
+      50075,
+      b"/chat.C/Echo",
+      [b"one", b"two"],
+    )
+    assert_eq(status == b"200", true)
+    assert_eq(grpc_status == b"0", true)
+    // an echo per request, then the farewell from on_end.
+    assert_eq(replies.length(), 3)
+    assert_eq(replies[0] == b"re:one", true)
+    assert_eq(replies[1] == b"re:two", true)
+    assert_eq(replies[2] == b"bye", true)
     task.cancel()
   })
 }

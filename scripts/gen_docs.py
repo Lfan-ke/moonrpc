@@ -31,14 +31,18 @@ SECTIONS = [
      "The pure, transport-independent server core: H2Server::feed turns a stream of "
      "decoded frames into the frames to send back — driving the stream state machine, "
      "the stateful HPACK codec, and connection- and stream-level flow control (RFC 7540 "
-     "§6.9), dispatching a completed application/grpc request to a registered handler "
-     "and framing the reply as HEADERS + DATA + trailers. Exercised in-memory on every "
-     "backend."),
+     "§6.9), routing a completed application/grpc request to a handler of any of the four "
+     "call kinds and framing each produced message as its own length-prefixed DATA, closed "
+     "by grpc-status trailers. Exercised in-memory on every backend."),
+    ("streaming", "streaming.mbt", "Streaming call kinds & context",
+     "The four gRPC cardinalities (Unary / ServerStreaming / ClientStreaming / Bidi) and "
+     "the per-call RpcContext: request metadata, the grpc-timeout deadline, and response "
+     "initial/trailing metadata the handler can set."),
     ("net", "net/serve.mbt", "h2c socket transport (native)",
      "The native driver that pumps bytes between a real @socket.Tcp connection and the "
-     "H2Server engine: GrpcServer registers unary handlers and serves them over the "
-     "self-built HTTP/2 (h2c) transport. Native-only — real sockets and moonbitlang/async "
-     "have no JS/Wasm backend."),
+     "H2Server engine: GrpcServer registers handlers of every call kind and serves them "
+     "over the self-built HTTP/2 (h2c) transport. Native-only — real sockets and "
+     "moonbitlang/async have no JS/Wasm backend."),
 ]
 
 KIND = {"struct": "struct", "enum": "enum", "fn": "fn", "type": "type", "let": "let"}

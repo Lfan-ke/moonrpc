@@ -12,13 +12,32 @@
 
 `moonrpc` targets **real gRPC** — not gRPC-Web. Where the MoonBit ecosystem lacks the primitives, we build them: the north star is a self-built **HTTP/2 (RFC 7540)** framing layer with stream multiplexing and **HPACK (RFC 7541)**, carrying `application/grpc+proto` over `h2c`.
 
-`v0.4` **serves a real unary gRPC call** over the self-built **HTTP/2 (h2c)** transport. A pure, all-backend protocol engine (`H2Server`) drives the frame layer, the stream state machine, complete HPACK, and connection- and stream-level flow control; a native `moonbitlang/async` socket driver (`GrpcServer`) pumps the bytes:
+`v0.5` **serves all four gRPC call kinds** — unary, server-, client-, and bidirectional-streaming — over the self-built **HTTP/2 (h2c)** transport. A pure, all-backend protocol engine (`H2Server`) drives the frame layer, the stream state machine, complete HPACK, and connection- and stream-level flow control honoured across the whole multi-message exchange; a native `moonbitlang/async` socket driver (`GrpcServer`) pumps the bytes:
 
 ```moonbit
 let server = @net.GrpcServer::new()
-server.register("/greet.Greeter/SayHello", req => handle(req))  // (Bytes) -> Bytes
-server.serve(port=50051)   // a real gRPC client / in-process client gets the reply
+
+// unary: one request, one reply.
+server.register("/greet.Greeter/SayHello", req => handle(req))
+
+// server-streaming: one request, an ordered run of replies.
+server.register_server_streaming("/count.C/Up", (ctx, req) => [
+  first(req), second(req), third(req),
+])
+
+// client-streaming: many requests collected, one reply at half-close.
+server.register_client_streaming("/sum.S/Add", (ctx, msgs) => fold(msgs))
+
+// bidi: each request echoed as it arrives, a farewell at half-close.
+server.register_bidi("/chat.C/Echo", ctx => @moonrpc.BidiHandler::{
+  on_message: m => [reply_to(m)],
+  on_end: () => [b"bye"],
+})
+
+server.serve(port=50051)   // a real gRPC / in-process client gets the replies
 ```
+
+The handler sees the call's `RpcContext`: the request metadata, the `grpc-timeout` deadline in milliseconds, and slots for response initial and trailing metadata.
 
 Under the hood, everything below `serve` is a **pure, transport-independent engine** — `feed` turns a stream of decoded frames into the frames to write back, so the whole server path (HPACK, flow control, dispatch, HEADERS + DATA + `grpc-status` trailers) is exercised in-memory on **every backend**; only the socket driver is native.
 
@@ -94,9 +113,11 @@ m.path()                                 // "/greet.Greeter/SayHello"
 
 `v0` = framing + status + method descriptors; `v0.2` = the first **HPACK** primitives (static table + integer representation + non-Huffman string literals). `v0.3` self-builds the load-bearing transport primitives: the **HTTP/2 frame layer** (all ten types — DATA / HEADERS / PRIORITY / RST_STREAM / SETTINGS / PUSH_PROMISE / PING / GOAWAY / WINDOW_UPDATE / CONTINUATION — with flags and payloads), the connection preface, the **stream state machine** (§5.1 + §5.1.1 id rules), and **complete HPACK** (Huffman coding + the dynamic table with eviction + the stateful encoder/decoder).
 
-`v0.4` makes the server **actually run**: the `H2Server` engine reads frames off a connection, demultiplexes by stream id, drives the per-stream state machine, exchanges SETTINGS, and honours connection- and stream-level flow-control windows with WINDOW_UPDATE; it receives a request stream (HEADERS with HPACK-decoded `:method` / `:path` / `content-type`, then a length-prefixed DATA message), dispatches to a registered `(Bytes) -> Bytes` handler, and responds with HEADERS (`:status 200`, `grpc-encoding`) + DATA + trailer HEADERS (`grpc-status`). The native `GrpcServer` binds this engine to real `moonbitlang/async` TCP sockets, proven by an in-process h2c client that makes a unary call end-to-end (frame + HPACK codecs on both sides), mutation-verified. Note: the async TLS layer exposes no ALPN, so `h2` runs via **h2c** (prior-knowledge) until an ALPN hook lands upstream.
+`v0.4` makes the server **actually run**: the `H2Server` engine reads frames off a connection, demultiplexes by stream id, drives the per-stream state machine, exchanges SETTINGS, and honours connection- and stream-level flow-control windows with WINDOW_UPDATE; it receives a request stream, dispatches to a registered `(Bytes) -> Bytes` handler, and responds with HEADERS (`:status 200`, `grpc-encoding`) + DATA + trailer HEADERS (`grpc-status`). The native `GrpcServer` binds this engine to real `moonbitlang/async` TCP sockets, proven by an in-process h2c client that makes a unary call end-to-end. Note: the async TLS layer exposes no ALPN, so `h2` runs via **h2c** (prior-knowledge) until an ALPN hook lands upstream.
 
-Next: server / client / bidirectional **streaming**, full **metadata** (incl. `-bin`), `grpc-timeout` **deadlines** + cancel, rich errors, per-message gzip, and interceptors; then the **Channel** client stack, and reflection / health / channelz.
+`v0.5` adds the **streaming** modes on the same engine. A method is registered as one of four cardinalities — unary, server-streaming (`(ctx, req) -> [reply]`), client-streaming (`(ctx, [req]) -> reply`), or bidi (a `BidiHandler` whose `on_message` fires per request message and whose `on_end` fires at half-close). The engine reassembles length-prefixed messages out of the DATA stream, routes each to the handler, and frames every produced message as its own length-prefixed DATA — flow control is honoured across the whole multi-message exchange, so a reply larger than the window splits and resumes on WINDOW_UPDATE. Request **metadata** and the **`grpc-timeout` deadline** are parsed and surfaced to the handler, which can set response initial and trailing metadata. Two in-process h2c clients — a server-streaming call receiving multiple framed replies in order and a client-streaming call sending many messages for one reply — prove it end-to-end, mutation-verified against the stream terminator and the flow-control windows.
+
+Next: `-bin` metadata round-trip and deadline cancellation, rich errors (`google.rpc.Status`), per-message gzip, and interceptors; then the **Channel** client stack, and reflection / health / channelz.
 
 ## License
 

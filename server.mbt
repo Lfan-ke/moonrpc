@@ -2,10 +2,11 @@
 // frames into a stream of frames to send back — the transport-independent core
 // of a gRPC server. It drives the §5.1 stream state machine, the stateful HPACK
 // encoder/decoder, and connection- and stream-level flow control (RFC 7540 §6.9),
-// dispatching a completed `application/grpc` request to a registered handler and
-// framing the reply as HEADERS + DATA + trailers. No sockets and no async here:
-// `feed` is a total function over frames, so the whole engine is exercised
-// in-memory on every backend; the socket driver in `net/` only pumps bytes.
+// routing a completed `application/grpc` request to one of the four call kinds
+// (unary / server- / client- / bidi-streaming) and framing each produced message
+// as its own length-prefixed DATA, closed by `grpc-status` trailers. No sockets
+// and no async here: `feed` is a total function over frames, so the whole engine
+// runs in-memory on every backend; the socket driver in `net/` only pumps bytes.
 
 ///|
 /// The HTTP/2 default flow-control window and initial `SETTINGS_INITIAL_WINDOW_SIZE`
@@ -17,24 +18,36 @@ pub let default_window_size : Int = 65535
 pub let default_max_frame_size : Int = 16384
 
 ///|
-/// A registered unary gRPC handler: it maps a request message (already stripped
-/// of its length prefix) to a reply message. The engine adds the length prefix
-/// and the `grpc-status: 0` trailer around a successful return.
+/// One server-side stream: its lifecycle state, the accumulating request header
+/// block and DATA (with a cursor over the length-prefixed messages already pulled
+/// out of it), the per-stream flow-control windows, and the response side — the
+/// bytes still to send, whether the initial HEADERS and the trailers have gone
+/// out, and any live bidi call state.
 pub(all) struct SrvStream {
   id : Int
   mut state : StreamState
   header_block : Buffer
   data : Buffer
+  mut req_off : Int
+  req_msgs : Array[Bytes]
+  mut bidi_processed : Int
   mut headers_complete : Bool
   mut end_stream_recv : Bool
   mut path : String
+  mut ctx : RpcContext
   mut recv_window : Int
   mut send_window : Int
   mut out : Bytes
   mut out_off : Int
-  mut trailers : Array[Header]?
+  mut started : Bool
+  mut started_response : Bool
+  mut response_ended : Bool
+  mut finalized : Bool
+  mut trailers_only : Bool
+  mut status_code : Int
+  mut headers_sent : Bool
   mut trailers_sent : Bool
-  mut dispatched : Bool
+  mut bidi : BidiHandler?
 }
 
 ///|
@@ -44,16 +57,26 @@ fn SrvStream::new(id : Int, send_window : Int) -> SrvStream {
     state: Idle,
     header_block: Buffer(),
     data: Buffer(),
+    req_off: 0,
+    req_msgs: [],
+    bidi_processed: 0,
     headers_complete: false,
     end_stream_recv: false,
     path: "",
+    ctx: RpcContext::empty(),
     recv_window: default_window_size,
     send_window,
     out: b"",
     out_off: 0,
-    trailers: None,
+    started: false,
+    started_response: false,
+    response_ended: false,
+    finalized: false,
+    trailers_only: false,
+    status_code: 0,
+    headers_sent: false,
     trailers_sent: false,
-    dispatched: false,
+    bidi: None,
   }
 }
 
@@ -63,7 +86,7 @@ fn SrvStream::new(id : Int, send_window : Int) -> SrvStream {
 /// that bound what we may send. Persistent across the whole connection because
 /// HPACK and flow control are stateful.
 pub struct H2Server {
-  handlers : Map[String, (Bytes) -> Bytes]
+  handlers : Map[String, Handler]
   encoder : HpackEncoder
   decoder : HpackDecoder
   streams : Map[Int, SrvStream]
@@ -92,15 +115,70 @@ pub fn H2Server::new() -> H2Server {
 }
 
 ///|
-/// Register a unary handler for a fully-qualified gRPC path (`/pkg.Service/Method`).
-/// A request whose `:path` matches is dispatched to `handler`; an unmatched path
-/// gets a trailers-only `grpc-status: 12` (UNIMPLEMENTED) response.
+/// Register a unary handler for a fully-qualified gRPC path (`/pkg.Service/Method`):
+/// one request message in, one reply message out. An unmatched path gets a
+/// trailers-only `grpc-status: 12` (UNIMPLEMENTED) response.
 pub fn H2Server::register(
   self : H2Server,
   path : String,
   handler : (Bytes) -> Bytes,
 ) -> Unit {
+  self.handlers[path] = Unary((_ctx, req) => handler(req))
+}
+
+///|
+/// Register a handler of any of the four gRPC call kinds.
+pub fn H2Server::register_handler(
+  self : H2Server,
+  path : String,
+  handler : Handler,
+) -> Unit {
   self.handlers[path] = handler
+}
+
+///|
+/// Register a unary handler that also sees the call context (metadata, deadline,
+/// and the response metadata slots).
+pub fn H2Server::register_unary(
+  self : H2Server,
+  path : String,
+  handler : (RpcContext, Bytes) -> Bytes,
+) -> Unit {
+  self.handlers[path] = Unary(handler)
+}
+
+///|
+/// Register a server-streaming handler: one request message, an ordered sequence
+/// of reply messages, each framed as its own gRPC message.
+pub fn H2Server::register_server_streaming(
+  self : H2Server,
+  path : String,
+  handler : (RpcContext, Bytes) -> Array[Bytes],
+) -> Unit {
+  self.handlers[path] = ServerStreaming(handler)
+}
+
+///|
+/// Register a client-streaming handler: every request message the client sends is
+/// collected, and after the client half-closes the handler returns one reply.
+pub fn H2Server::register_client_streaming(
+  self : H2Server,
+  path : String,
+  handler : (RpcContext, Array[Bytes]) -> Bytes,
+) -> Unit {
+  self.handlers[path] = ClientStreaming(handler)
+}
+
+///|
+/// Register a bidirectional-streaming handler. The factory runs once per call and
+/// returns a `BidiHandler` whose `on_message` fires per request message (its
+/// replies stream out immediately) and whose `on_end` fires at half-close.
+pub fn H2Server::register_bidi(
+  self : H2Server,
+  path : String,
+  factory : (RpcContext) -> BidiHandler,
+) -> Unit {
+  self.handlers[path] = Bidi(factory)
 }
 
 ///|
@@ -153,6 +231,15 @@ fn int_to_ascii_bytes(n : Int) -> Bytes {
 }
 
 ///|
+/// Concatenate two byte strings.
+fn cat(a : Bytes, b : Bytes) -> Bytes {
+  let buf = Buffer()
+  buf.write_bytes(a)
+  buf.write_bytes(b)
+  buf.to_bytes()
+}
+
+///|
 /// The value of the first header named `name` in `headers`, or `None`.
 fn header_value(headers : Array[Header], name : Bytes) -> Bytes? {
   for h in headers {
@@ -164,6 +251,20 @@ fn header_value(headers : Array[Header], name : Bytes) -> Bytes? {
 }
 
 ///|
+/// Whether a request header is a pseudo-header (`:`-prefixed) or a reserved gRPC/
+/// HTTP header, and so is *not* surfaced as call metadata (RFC 7540 §8.1.2.1 plus
+/// the gRPC HTTP/2 mapping).
+fn is_reserved_header(name : Bytes) -> Bool {
+  (name.length() > 0 && name[0] == b':') ||
+  name == b"content-type" ||
+  name == b"te" ||
+  name == b"grpc-timeout" ||
+  name == b"grpc-encoding" ||
+  name == b"grpc-accept-encoding" ||
+  name == b"user-agent"
+}
+
+///|
 fn min3(a : Int, b : Int, c : Int) -> Int {
   let m = if a < b { a } else { b }
   if m < c {
@@ -171,6 +272,28 @@ fn min3(a : Int, b : Int, c : Int) -> Int {
   } else {
     c
   }
+}
+
+///|
+/// Pull every complete length-prefixed message now buffered on this stream into
+/// `req_msgs`, advancing the read cursor. Partial trailing bytes stay buffered for
+/// a later DATA frame to complete.
+fn drain_messages(s : SrvStream) -> Unit {
+  let all = s.data.to_bytes()
+  let n = all.length()
+  let mut off = s.req_off
+  while n - off >= 5 {
+    let len = (all[off + 1].to_int() << 24) |
+      (all[off + 2].to_int() << 16) |
+      (all[off + 3].to_int() << 8) |
+      all[off + 4].to_int()
+    if n - off < 5 + len {
+      break
+    }
+    s.req_msgs.push(all[off + 5:off + 5 + len].to_owned())
+    off = off + 5 + len
+  }
+  s.req_off = off
 }
 
 // -- the frame-processing core ----------------------------------------------
@@ -227,8 +350,8 @@ fn H2Server::replenish(self : H2Server, s : SrvStream) -> Array[Frame] {
 ///|
 /// Feed one decoded incoming frame to the engine, advancing all state and
 /// returning the frames to write back (SETTINGS ack, PING pong, WINDOW_UPDATE,
-/// and — once a request completes — the framed gRPC response). Raises on an
-/// illegal stream transition or a malformed header block.
+/// and — as the request stream progresses — the framed gRPC response messages and
+/// trailers). Raises on an illegal stream transition or a malformed header block.
 pub fn H2Server::feed(self : H2Server, frame : Frame) -> Array[Frame] raise {
   match frame {
     Settings(params~, ack~) =>
@@ -259,7 +382,7 @@ pub fn H2Server::feed(self : H2Server, frame : Frame) -> Array[Frame] raise {
       if end_headers {
         self.complete_headers(s)
       }
-      self.maybe_dispatch(s)
+      self.advance(s)
     }
     Continuation(stream_id~, fragment~, end_headers~) => {
       let s = self.stream(stream_id)
@@ -267,7 +390,7 @@ pub fn H2Server::feed(self : H2Server, frame : Frame) -> Array[Frame] raise {
       if end_headers {
         self.complete_headers(s)
       }
-      self.maybe_dispatch(s)
+      self.advance(s)
     }
     Data(stream_id~, data~, end_stream~, padding~) => {
       let s = self.stream(stream_id)
@@ -280,7 +403,7 @@ pub fn H2Server::feed(self : H2Server, frame : Frame) -> Array[Frame] raise {
         s.end_stream_recv = true
       }
       let frames = self.replenish(s)
-      for f in self.maybe_dispatch(s) {
+      for f in self.advance(s) {
         frames.push(f)
       }
       frames
@@ -301,80 +424,136 @@ pub fn H2Server::feed(self : H2Server, frame : Frame) -> Array[Frame] raise {
 }
 
 ///|
-/// HPACK-decode this stream's accumulated header block and pull out `:path`.
+/// HPACK-decode this stream's accumulated header block, pull out `:path`, and build
+/// the call context (surfaced metadata + parsed `grpc-timeout` deadline).
 fn H2Server::complete_headers(self : H2Server, s : SrvStream) -> Unit raise {
   let headers = self.decoder.decode(s.header_block.to_bytes())
   s.path = match header_value(headers, b":path") {
     Some(p) => bytes_to_ascii(p)
     None => ""
   }
+  let metadata : Array[Header] = []
+  for h in headers {
+    if !is_reserved_header(h.name) {
+      metadata.push(h)
+    }
+  }
+  let deadline = match header_value(headers, b"grpc-timeout") {
+    Some(v) => parse_grpc_timeout(v)
+    None => None
+  }
+  s.ctx = {
+    path: s.path,
+    metadata,
+    deadline_millis: deadline,
+    resp_headers: [],
+    resp_trailers: [],
+  }
   s.headers_complete = true
 }
 
 ///|
-/// Dispatch once the request is fully received (headers complete and END_STREAM
-/// seen), exactly once per stream.
-fn H2Server::maybe_dispatch(
-  self : H2Server,
-  s : SrvStream,
-) -> Array[Frame] raise {
-  if s.headers_complete && s.end_stream_recv && !s.dispatched {
-    s.dispatched = true
-    self.dispatch(s)
-  } else {
-    []
+/// Advance a stream after new frames: resolve its handler, route any newly
+/// completed request messages to it (streaming replies flow out as they are
+/// produced), finalize once the client half-closes, and emit whatever the send
+/// windows now permit. Idempotent — safe to call after every frame.
+fn H2Server::advance(self : H2Server, s : SrvStream) -> Array[Frame] raise {
+  if !s.headers_complete {
+    return []
   }
+  if !s.started {
+    s.started = true
+    match self.handlers.get(s.path) {
+      Some(Bidi(factory)) => s.bidi = Some(factory(s.ctx))
+      Some(_) => ()
+      None => {
+        s.trailers_only = true
+        s.status_code = Status::code(Unimplemented)
+        s.response_ended = true
+      }
+    }
+  }
+  if !s.trailers_only {
+    drain_messages(s)
+    match self.handlers.get(s.path) {
+      Some(Bidi(_)) =>
+        match s.bidi {
+          Some(bh) =>
+            while s.bidi_processed < s.req_msgs.length() {
+              let m = s.req_msgs[s.bidi_processed]
+              s.bidi_processed = s.bidi_processed + 1
+              for r in (bh.on_message)(m) {
+                self.enqueue(s, r)
+              }
+            }
+          None => ()
+        }
+      _ => ()
+    }
+    if s.end_stream_recv && !s.finalized {
+      s.finalized = true
+      self.finalize(s)
+    }
+  }
+  self.produce(s)
 }
 
 ///|
-/// Run the registered handler (or answer UNIMPLEMENTED) and produce the response
-/// frames: a HEADERS with `:status 200` + `content-type application/grpc`, the
-/// length-prefixed reply as flow-controlled DATA, then a trailer HEADERS carrying
-/// `grpc-status`.
-fn H2Server::dispatch(self : H2Server, s : SrvStream) -> Array[Frame] raise {
-  let message = match decode_message(s.data.to_bytes()) {
-    Some((_, payload)) => payload
-    None => b""
-  }
+/// Append a reply message to the stream's outbound buffer, length-prefixed, and
+/// mark that a normal response has begun (so its initial HEADERS get sent).
+fn H2Server::enqueue(self : H2Server, s : SrvStream, msg : Bytes) -> Unit {
+  ignore(self)
+  s.out = cat(s.out, encode_message(msg))
+  s.started_response = true
+}
+
+///|
+/// Run the resolved handler at half-close, enqueue its reply message(s), and mark
+/// the response body complete so the trailers follow once the body drains.
+fn H2Server::finalize(self : H2Server, s : SrvStream) -> Unit {
   match self.handlers.get(s.path) {
-    Some(handler) => {
-      let reply = handler(message)
-      let block = self.encoder.encode([
-        { name: b":status", value: b"200" },
-        { name: b"content-type", value: b"application/grpc" },
-        { name: b"grpc-encoding", value: b"identity" },
-      ])
-      let frames : Array[Frame] = [
-        Headers(
-          stream_id=s.id,
-          fragment=block,
-          end_stream=false,
-          end_headers=true,
-          priority=None,
-          padding=0,
-        ),
-      ]
-      s.state = s.state.on_send(Headers(end_stream=false))
-      s.out = encode_message(reply)
-      s.out_off = 0
-      s.trailers = Some([{ name: b"grpc-status", value: b"0" }])
-      for f in self.pump_stream(s) {
-        frames.push(f)
-      }
-      frames
+    Some(Unary(h)) => {
+      let msg = if s.req_msgs.length() > 0 { s.req_msgs[0] } else { b"" }
+      self.enqueue(s, h(s.ctx, msg))
     }
-    None => {
+    Some(ServerStreaming(h)) => {
+      let msg = if s.req_msgs.length() > 0 { s.req_msgs[0] } else { b"" }
+      for r in h(s.ctx, msg) {
+        self.enqueue(s, r)
+      }
+    }
+    Some(ClientStreaming(h)) => self.enqueue(s, h(s.ctx, s.req_msgs))
+    Some(Bidi(_)) =>
+      match s.bidi {
+        Some(bh) =>
+          for r in (bh.on_end)() {
+            self.enqueue(s, r)
+          }
+        None => ()
+      }
+    None => ()
+  }
+  s.started_response = true
+  s.response_ended = true
+}
+
+///|
+/// Emit the frames a stream can send right now: the response HEADERS once a normal
+/// response has begun, as much buffered DATA as the connection and stream send
+/// windows and `remote_max_frame` allow, then the trailer HEADERS carrying
+/// `grpc-status` once the body is fully drained. The trailers-only UNIMPLEMENTED
+/// path is a single END_STREAM HEADERS with no DATA.
+fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
+  let frames : Array[Frame] = []
+  if s.trailers_only {
+    if !s.trailers_sent {
       let block = self.encoder.encode([
         { name: b":status", value: b"200" },
         { name: b"content-type", value: b"application/grpc" },
-        {
-          name: b"grpc-status",
-          value: int_to_ascii_bytes(Status::code(Unimplemented)),
-        },
+        { name: b"grpc-status", value: int_to_ascii_bytes(s.status_code) },
         { name: b"grpc-message", value: b"method not found" },
       ])
-      s.state = s.state.on_send(Headers(end_stream=true))
-      [
+      frames.push(
         Headers(
           stream_id=s.id,
           fragment=block,
@@ -383,18 +562,35 @@ fn H2Server::dispatch(self : H2Server, s : SrvStream) -> Array[Frame] raise {
           priority=None,
           padding=0,
         ),
-      ]
+      )
+      s.state = s.state.on_send(Headers(end_stream=true))
+      s.trailers_sent = true
     }
+    return frames
   }
-}
-
-///|
-/// Emit as much of a stream's pending response DATA as the connection and stream
-/// send windows allow, in `remote_max_frame`-sized frames, then the trailer
-/// HEADERS once the body is fully drained. Re-invoked when a WINDOW_UPDATE grows a
-/// window (RFC 7540 §6.9.1): back-pressure is honoured, never violated.
-fn H2Server::pump_stream(self : H2Server, s : SrvStream) -> Array[Frame] raise {
-  let frames : Array[Frame] = []
+  if s.started_response && !s.headers_sent {
+    let headers : Array[Header] = [
+      { name: b":status", value: b"200" },
+      { name: b"content-type", value: b"application/grpc" },
+      { name: b"grpc-encoding", value: b"identity" },
+    ]
+    for h in s.ctx.resp_headers {
+      headers.push(h)
+    }
+    let block = self.encoder.encode(headers)
+    frames.push(
+      Headers(
+        stream_id=s.id,
+        fragment=block,
+        end_stream=false,
+        end_headers=true,
+        priority=None,
+        padding=0,
+      ),
+    )
+    s.state = s.state.on_send(Headers(end_stream=false))
+    s.headers_sent = true
+  }
   while s.out_off < s.out.length() {
     let remaining = s.out.length() - s.out_off
     let budget = min3(
@@ -412,37 +608,41 @@ fn H2Server::pump_stream(self : H2Server, s : SrvStream) -> Array[Frame] raise {
     s.send_window = s.send_window - n
     frames.push(Data(stream_id=s.id, data=chunk, end_stream=false, padding=0))
   }
-  if s.out_off >= s.out.length() && !s.trailers_sent {
-    match s.trailers {
-      Some(tr) => {
-        let block = self.encoder.encode(tr)
-        frames.push(
-          Headers(
-            stream_id=s.id,
-            fragment=block,
-            end_stream=true,
-            end_headers=true,
-            priority=None,
-            padding=0,
-          ),
-        )
-        s.state = s.state.on_send(Headers(end_stream=true))
-        s.trailers_sent = true
-      }
-      None => ()
+  if s.response_ended &&
+    s.out_off >= s.out.length() &&
+    s.headers_sent &&
+    !s.trailers_sent {
+    let trailers : Array[Header] = [
+      { name: b"grpc-status", value: int_to_ascii_bytes(s.status_code) },
+    ]
+    for h in s.ctx.resp_trailers {
+      trailers.push(h)
     }
+    let block = self.encoder.encode(trailers)
+    frames.push(
+      Headers(
+        stream_id=s.id,
+        fragment=block,
+        end_stream=true,
+        end_headers=true,
+        priority=None,
+        padding=0,
+      ),
+    )
+    s.state = s.state.on_send(Headers(end_stream=true))
+    s.trailers_sent = true
   }
   frames
 }
 
 ///|
-/// Pump every stream that still has buffered response data (after a connection-level
-/// WINDOW_UPDATE lifts back-pressure on all of them at once).
+/// Pump every stream that has started but not finished sending (after a
+/// connection-level WINDOW_UPDATE lifts back-pressure on all of them at once).
 fn H2Server::pump_all(self : H2Server) -> Array[Frame] raise {
   let frames : Array[Frame] = []
   for _, s in self.streams {
-    if s.dispatched && !s.trailers_sent {
-      for f in self.pump_stream(s) {
+    if s.started && !s.trailers_sent {
+      for f in self.produce(s) {
         frames.push(f)
       }
     }
