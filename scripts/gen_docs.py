@@ -27,6 +27,18 @@ SECTIONS = [
     ("stream", "stream.mbt", "HTTP/2 stream state machine",
      "The RFC 7540 §5.1 stream lifecycle (idle / open / half-closed / closed) and "
      "the §5.1.1 stream-identifier parity rules."),
+    ("server", "server.mbt", "gRPC server engine",
+     "The pure, transport-independent server core: H2Server::feed turns a stream of "
+     "decoded frames into the frames to send back — driving the stream state machine, "
+     "the stateful HPACK codec, and connection- and stream-level flow control (RFC 7540 "
+     "§6.9), dispatching a completed application/grpc request to a registered handler "
+     "and framing the reply as HEADERS + DATA + trailers. Exercised in-memory on every "
+     "backend."),
+    ("net", "net/serve.mbt", "h2c socket transport (native)",
+     "The native driver that pumps bytes between a real @socket.Tcp connection and the "
+     "H2Server engine: GrpcServer registers unary handlers and serves them over the "
+     "self-built HTTP/2 (h2c) transport. Native-only — real sockets and moonbitlang/async "
+     "have no JS/Wasm backend."),
 ]
 
 KIND = {"struct": "struct", "enum": "enum", "fn": "fn", "type": "type", "let": "let"}
@@ -184,10 +196,13 @@ document.addEventListener("DOMContentLoaded",()=>{
 });
 """
 
-CONTRACT = """let frame = encode_message(b"hello grpc")   // [flag][4-byte big-endian len][payload]
-let (compressed, payload) = decode_message(frame).unwrap()
+CONTRACT = """let server = @net.GrpcServer::new()
+server.register("/greet.Greeter/SayHello", req => handle(req))   // (bytes) -> bytes
+server.serve(port=50051)          // a real unary gRPC call over self-built h2c
 
-Status::code(NotFound)  // 5      Status::name(Ok)  // "OK"   (17 canonical codes)"""
+// under the hood — a pure, all-backend protocol engine over the frame + HPACK codecs:
+let engine = H2Server::new()
+let out = engine.feed(frame)      // frames in -> HEADERS + DATA + grpc-status trailers out"""
 
 
 def esc(t):
@@ -216,12 +231,14 @@ def main():
              '</div></aside>']
 
     hero = ('<main><header class="hero"><h1>moonrpc</h1>'
-            '<p class="tag">A real gRPC implementation for MoonBit &#8212; not gRPC-Web. v0 ships the '
-            'length-prefixed message framing and status model shared by every gRPC '
-            'transport; the self-built HTTP/2 + HPACK stack is sequenced after.</p>'
+            '<p class="tag">A real gRPC implementation for MoonBit &#8212; not gRPC-Web. It now '
+            '<strong>serves a real unary gRPC call</strong> over a self-built HTTP/2 (h2c) '
+            'transport: the RFC 7540 frame layer, the stream state machine, complete HPACK '
+            '(RFC 7541), and connection- and stream-level flow control &#8212; the protocol '
+            'engine is pure and runs on every backend; the socket driver is native.</p>'
             '<div class="badges">'
             '<a href="https://github.com/Lfan-ke/moonrpc/actions"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Lfan-ke/moonrpc/ci.yml?branch=master&label=CI&logo=github"></a>'
-            '<img alt="tests" src="https://img.shields.io/badge/tests-5%20passing%20%C3%974%20backends-0ca678">'
+            '<img alt="tests" src="https://img.shields.io/badge/tests-66%20%C3%974%20backends%20%2B%20native%20h2c-0ca678">'
             '<a href="https://github.com/Lfan-ke/moonrpc"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-source-24292f?logo=github"></a>'
             '<img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-6d5efc"></div>'
             '<div class="install"><span class="prompt">$</span><code>moon add Lfan-ke/moonrpc</code>'

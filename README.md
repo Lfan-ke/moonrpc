@@ -12,7 +12,23 @@
 
 `moonrpc` targets **real gRPC** — not gRPC-Web. Where the MoonBit ecosystem lacks the primitives, we build them: the north star is a self-built **HTTP/2 (RFC 7540)** framing layer with stream multiplexing and **HPACK (RFC 7541)**, carrying `application/grpc+proto` over `h2c`.
 
-`v0.3` self-builds the **HTTP/2 framing layer**, the **stream state machine**, and **complete HPACK** (Huffman + dynamic table) — the load-bearing transport primitives — verified across all backends:
+`v0.4` **serves a real unary gRPC call** over the self-built **HTTP/2 (h2c)** transport. A pure, all-backend protocol engine (`H2Server`) drives the frame layer, the stream state machine, complete HPACK, and connection- and stream-level flow control; a native `moonbitlang/async` socket driver (`GrpcServer`) pumps the bytes:
+
+```moonbit
+let server = @net.GrpcServer::new()
+server.register("/greet.Greeter/SayHello", req => handle(req))  // (Bytes) -> Bytes
+server.serve(port=50051)   // a real gRPC client / in-process client gets the reply
+```
+
+Under the hood, everything below `serve` is a **pure, transport-independent engine** — `feed` turns a stream of decoded frames into the frames to write back, so the whole server path (HPACK, flow control, dispatch, HEADERS + DATA + `grpc-status` trailers) is exercised in-memory on **every backend**; only the socket driver is native.
+
+```moonbit
+let engine = @moonrpc.H2Server::new()
+engine.register("/echo.Echo/Say", req => req)
+let out = engine.feed(frame)   // -> [HEADERS(:status 200), DATA(reply), HEADERS(grpc-status:0)]
+```
+
+It builds on the load-bearing transport primitives, all verified across every backend:
 
 ## The gRPC message framing
 
@@ -76,7 +92,11 @@ m.path()                                 // "/greet.Greeter/SayHello"
 
 ## Roadmap (the self-built stack, sequenced to completeness)
 
-`v0` = framing + status + method descriptors; `v0.2` = the first **HPACK** primitives (static table + integer representation + non-Huffman string literals). `v0.3` self-builds the load-bearing transport primitives: the **HTTP/2 frame layer** (all ten types — DATA / HEADERS / PRIORITY / RST_STREAM / SETTINGS / PUSH_PROMISE / PING / GOAWAY / WINDOW_UPDATE / CONTINUATION — with flags and payloads), the connection preface, the **stream state machine** (§5.1 + §5.1.1 id rules), and **complete HPACK** (Huffman coding + the dynamic table with eviction + the stateful encoder/decoder). Next: the connection multiplexer, connection-level and stream-level flow control over `moonbitlang/async` TCP sockets; then `application/grpc+proto` transport with unary + server / client / bidirectional streaming, full metadata / deadlines / interceptors, and reflection / health / channelz. Note: the async TLS layer exposes no ALPN, so `h2` runs via **h2c** (prior-knowledge / upgrade) until an ALPN hook lands upstream.
+`v0` = framing + status + method descriptors; `v0.2` = the first **HPACK** primitives (static table + integer representation + non-Huffman string literals). `v0.3` self-builds the load-bearing transport primitives: the **HTTP/2 frame layer** (all ten types — DATA / HEADERS / PRIORITY / RST_STREAM / SETTINGS / PUSH_PROMISE / PING / GOAWAY / WINDOW_UPDATE / CONTINUATION — with flags and payloads), the connection preface, the **stream state machine** (§5.1 + §5.1.1 id rules), and **complete HPACK** (Huffman coding + the dynamic table with eviction + the stateful encoder/decoder).
+
+`v0.4` makes the server **actually run**: the `H2Server` engine reads frames off a connection, demultiplexes by stream id, drives the per-stream state machine, exchanges SETTINGS, and honours connection- and stream-level flow-control windows with WINDOW_UPDATE; it receives a request stream (HEADERS with HPACK-decoded `:method` / `:path` / `content-type`, then a length-prefixed DATA message), dispatches to a registered `(Bytes) -> Bytes` handler, and responds with HEADERS (`:status 200`, `grpc-encoding`) + DATA + trailer HEADERS (`grpc-status`). The native `GrpcServer` binds this engine to real `moonbitlang/async` TCP sockets, proven by an in-process h2c client that makes a unary call end-to-end (frame + HPACK codecs on both sides), mutation-verified. Note: the async TLS layer exposes no ALPN, so `h2` runs via **h2c** (prior-knowledge) until an ALPN hook lands upstream.
+
+Next: server / client / bidirectional **streaming**, full **metadata** (incl. `-bin`), `grpc-timeout` **deadlines** + cancel, rich errors, per-message gzip, and interceptors; then the **Channel** client stack, and reflection / health / channelz.
 
 ## License
 
