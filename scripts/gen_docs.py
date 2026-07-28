@@ -9,6 +9,9 @@ SECTIONS = [
     ("rpc", "rpc.mbt", "Framing & status",
      "encode_message / decode_message implement gRPC length-prefixed framing; "
      "Status is the 17-code grpc-status model; Method renders the /Service/Method path."),
+    ("hpack", "hpack.mbt", "HPACK primitives",
+     "The RFC 7541 header-compression primitives: the 61-entry static table, the "
+     "prefix-integer representation (§5.1), and non-Huffman string literals (§5.2)."),
 ]
 
 KIND = {"struct": "struct", "enum": "enum", "fn": "fn", "type": "type", "let": "let"}
