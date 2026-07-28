@@ -39,6 +39,45 @@ server.serve(port=50051)   // a real gRPC / in-process client gets the replies
 
 The handler sees the call's `RpcContext`: the request metadata, the `grpc-timeout` deadline in milliseconds, and slots for response initial and trailing metadata.
 
+## The Channel client
+
+A `Channel` is one long-lived h2c connection; every call multiplexes over it on its own client-allocated stream id, sharing the connection's HPACK and flow-control state.
+
+```moonbit
+let chan = @net.Channel::connect("127.0.0.1", 50051)
+
+// unary.
+let reply = chan.unary("/greet.Greeter/SayHello", request)
+reply.messages[0]   // the reply message; reply.grpc_status is 0 on success
+
+// server-streaming: one request, every framed reply reassembled in order.
+let out = chan.server_streaming("/count.C/Up", request)   // out.messages
+
+// client-streaming: many requests, one reply.
+let sum = chan.client_streaming("/sum.S/Add", [a, b, c])
+
+// a deadline: sent as grpc-timeout and enforced locally — if it elapses the
+// stream is reset and grpc_status comes back DEADLINE_EXCEEDED (4).
+let bounded = chan.unary("/slow.S/Wait", request, timeout_millis=Some(200))
+```
+
+Under the Channel, `H2Client` is the same kind of pure, transport-independent engine as the server: it produces the request frames and consumes the response frames, so the whole client path is exercised in-memory on every backend against `H2Server`, and only the socket driver is native.
+
+## Health and interceptors
+
+The standard `grpc.health.v1.Health` service registers in one call, and server interceptors wrap every handler:
+
+```moonbit
+let health = @moonrpc.HealthService::new()
+health.set_status("greet.Greeter", @moonrpc.Serving)
+server.register_health(health)      // Check + Watch on /grpc.health.v1.Health/*
+
+engine.add_unary_interceptor((ctx, req, next) => {
+  // inspect, then proceed — or return without calling next to short-circuit.
+  next(ctx, req)
+})
+```
+
 Under the hood, everything below `serve` is a **pure, transport-independent engine** — `feed` turns a stream of decoded frames into the frames to write back, so the whole server path (HPACK, flow control, dispatch, HEADERS + DATA + `grpc-status` trailers) is exercised in-memory on **every backend**; only the socket driver is native.
 
 ```moonbit
@@ -117,7 +156,9 @@ m.path()                                 // "/greet.Greeter/SayHello"
 
 `v0.5` adds the **streaming** modes on the same engine. A method is registered as one of four cardinalities — unary, server-streaming (`(ctx, req) -> [reply]`), client-streaming (`(ctx, [req]) -> reply`), or bidi (a `BidiHandler` whose `on_message` fires per request message and whose `on_end` fires at half-close). The engine reassembles length-prefixed messages out of the DATA stream, routes each to the handler, and frames every produced message as its own length-prefixed DATA — flow control is honoured across the whole multi-message exchange, so a reply larger than the window splits and resumes on WINDOW_UPDATE. Request **metadata** and the **`grpc-timeout` deadline** are parsed and surfaced to the handler, which can set response initial and trailing metadata. Two in-process h2c clients — a server-streaming call receiving multiple framed replies in order and a client-streaming call sending many messages for one reply — prove it end-to-end, mutation-verified against the stream terminator and the flow-control windows.
 
-Next: `-bin` metadata round-trip and deadline cancellation, rich errors (`google.rpc.Status`), per-message gzip, and interceptors; then the **Channel** client stack, and reflection / health / channelz.
+`v0.6` adds the client half and the gRPC cross-cutting services. A real **Channel** — a long-lived, multiplexed h2c connection over a real `@socket.Tcp`, driven by a pure `H2Client` engine symmetric to the server — opens streams (client-allocated odd ids), HPACK-encodes request HEADERS, frames request DATA under the send windows, and reassembles the reply. It performs unary, server- and client-streaming calls against a real `GrpcServer` over an actual socket. The **`grpc.health.v1.Health`** service (Check + Watch) ships with a hand-coded protobuf codec for its two messages. Server-side unary and stream **interceptors** wrap a handler in an outermost-first chain that can rewrite the request, post-process the reply, or short-circuit. The **`grpc-timeout` deadline** is now enforced client-side: the Channel races the read loop against the timer and, when it elapses, resets the stream and surfaces `DEADLINE_EXCEEDED`.
+
+Next: Server Reflection (so `grpcurl` can list/describe), the full protobuf message runtime, `-bin` metadata round-trip, rich errors (`google.rpc.Status`), per-message gzip, and channelz; plus DNS/load-balancing and retry on the Channel.
 
 ## License
 

@@ -90,6 +90,8 @@ pub struct H2Server {
   encoder : HpackEncoder
   decoder : HpackDecoder
   streams : Map[Int, SrvStream]
+  unary_interceptors : Array[UnaryInterceptor]
+  stream_interceptors : Array[StreamInterceptor]
   mut conn_recv_window : Int
   mut conn_send_window : Int
   mut remote_initial_window : Int
@@ -106,6 +108,8 @@ pub fn H2Server::new() -> H2Server {
     encoder: HpackEncoder::new(),
     decoder: HpackDecoder::new(),
     streams: Map([]),
+    unary_interceptors: [],
+    stream_interceptors: [],
     conn_recv_window: default_window_size,
     conn_send_window: default_window_size,
     remote_initial_window: default_window_size,
@@ -514,11 +518,13 @@ fn H2Server::finalize(self : H2Server, s : SrvStream) -> Unit {
   match self.handlers.get(s.path) {
     Some(Unary(h)) => {
       let msg = if s.req_msgs.length() > 0 { s.req_msgs[0] } else { b"" }
-      self.enqueue(s, h(s.ctx, msg))
+      let effective = compose_unary(self.unary_interceptors, h)
+      self.enqueue(s, effective(s.ctx, msg))
     }
     Some(ServerStreaming(h)) => {
       let msg = if s.req_msgs.length() > 0 { s.req_msgs[0] } else { b"" }
-      for r in h(s.ctx, msg) {
+      let effective = compose_stream(self.stream_interceptors, h)
+      for r in effective(s.ctx, msg) {
         self.enqueue(s, r)
       }
     }

@@ -38,11 +38,27 @@ SECTIONS = [
      "The four gRPC cardinalities (Unary / ServerStreaming / ClientStreaming / Bidi) and "
      "the per-call RpcContext: request metadata, the grpc-timeout deadline, and response "
      "initial/trailing metadata the handler can set."),
+    ("client", "client.mbt", "gRPC client engine",
+     "The pure client core, symmetric to H2Server: H2Client allocates client stream ids, "
+     "builds request HEADERS and length-prefixed DATA honouring the send windows, and turns "
+     "the response frames back into a CallReply — the :status, grpc-status, reply messages, "
+     "and initial/trailing metadata. Runs in-memory on every backend."),
+    ("interceptor", "interceptor.mbt", "Server interceptors",
+     "Unary and server-streaming interceptor chains wrapped around a method handler, folded "
+     "outermost-first: each interceptor sees the context and request, calls next to proceed, "
+     "or returns without it to short-circuit."),
+    ("health", "health.mbt", "Health service",
+     "The grpc.health.v1.Health service (Check + Watch) with a hand-coded protobuf codec for "
+     "its two messages and a per-service ServingStatus table."),
     ("net", "net/serve.mbt", "h2c socket transport (native)",
      "The native driver that pumps bytes between a real @socket.Tcp connection and the "
      "H2Server engine: GrpcServer registers handlers of every call kind and serves them "
      "over the self-built HTTP/2 (h2c) transport. Native-only — real sockets and "
      "moonbitlang/async have no JS/Wasm backend."),
+    ("channel", "net/channel.mbt", "Channel client (native)",
+     "The native Channel: a long-lived, multiplexed h2c connection over a real @socket.Tcp, "
+     "driven by the H2Client engine, performing unary, server- and client-streaming calls and "
+     "enforcing the grpc-timeout deadline by racing the read loop against a timer."),
 ]
 
 KIND = {"struct": "struct", "enum": "enum", "fn": "fn", "type": "type", "let": "let"}
