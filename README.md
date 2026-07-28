@@ -12,7 +12,7 @@
 
 `moonrpc` targets **real gRPC** — not gRPC-Web. Where the MoonBit ecosystem lacks the primitives, we build them: the north star is a self-built **HTTP/2 (RFC 7540)** framing layer with stream multiplexing and **HPACK (RFC 7541)**, carrying `application/grpc+proto` over `h2c`.
 
-`v0` lands the wire primitives every gRPC transport shares, verified across all backends:
+`v0.3` self-builds the **HTTP/2 framing layer**, the **stream state machine**, and **complete HPACK** (Huffman + dynamic table) — the load-bearing transport primitives — verified across all backends:
 
 ## The gRPC message framing
 
@@ -26,17 +26,42 @@ let (compressed, payload) = @moonrpc.decode_message(frame).unwrap()
 
 This is the *Length-Prefixed-Message* framing shared by gRPC-Web (over HTTP/1.1) and real gRPC (over HTTP/2), so the transport can be swapped underneath it without touching the codec.
 
-## HPACK primitives (RFC 7541)
+## The HTTP/2 frame layer (RFC 7540)
 
-The first pieces of the self-built header compression: the 61-entry static table, the prefix-integer representation, and non-Huffman string literals — all pure and byte-level.
+All ten frame types encode to and decode from their exact wire bytes — a byte-level, exhaustively round-trippable codec that the multiplexer will layer on top without touching:
 
 ```moonbit
-@moonrpc.hpack_static_entry(2)              // Some((":method", "GET"))     — RFC index 2
+let f = @moonrpc.Frame::Headers(
+  stream_id=1, fragment=block, end_stream=true, end_headers=true,
+  priority=None, padding=0,
+)
+let bytes = f.encode()                       // 9-octet header + payload
+let (frame, consumed) = @moonrpc.decode_frame(bytes)   // raises Incomplete until whole
 
-@moonrpc.hpack_encode_int(1337, 5)          // [0x1F, 0x9A, 0x0A]           — §5.1 example
-let (value, consumed) = @moonrpc.hpack_decode_int(b"\x1F\x9A\x0A", 0, 5)    // (1337, 3)
+@moonrpc.has_connection_preface(buf)         // PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n (§3.5)
+```
 
-@moonrpc.hpack_encode_string(b"custom-key") // [0x0A]["custom-key"]         — H=0, 7-bit length prefix
+The stream state machine drives the §5.1 lifecycle (idle / open / half-closed / closed) off `END_STREAM` / push / reset, and rejects illegal transitions:
+
+```moonbit
+let s = @moonrpc.Stream::new(1)
+s.send(@moonrpc.StreamEvent::Headers(end_stream=false))  // -> Open
+s.recv(@moonrpc.StreamEvent::Data(end_stream=true))      // -> HalfClosedRemote
+```
+
+## Complete HPACK (RFC 7541)
+
+The full header-compression stack: the 61-entry static table, prefix integers, Huffman coding (Appendix B), and the size-bounded **dynamic table with eviction** — driven by a stateful encoder/decoder pair over the six field representations. Verified byte-for-byte against the Appendix C worked examples.
+
+```moonbit
+let enc = @moonrpc.HpackEncoder::new(huffman=true)
+let block = enc.encode([{ name: b":method", value: b"GET" },
+                        { name: b":authority", value: b"www.example.com" }])
+
+let dec = @moonrpc.HpackDecoder::new()
+let headers = dec.decode(block)              // back to the same header list
+
+@moonrpc.huffman_encode(b"www.example.com")  // f1e3 c2e5 f23a 6ba0 ab90 f4ff — §C.4.1
 ```
 
 ## The status model
@@ -51,7 +76,7 @@ m.path()                                 // "/greet.Greeter/SayHello"
 
 ## Roadmap (the self-built stack, sequenced to completeness)
 
-`v0` = framing + status + method descriptors; `v0.2` adds the first **HPACK** primitives (static table + integer representation + non-Huffman string literals). Next, the rest of HPACK (dynamic table + Huffman coding + the header-block field representations); the **HTTP/2 frame layer** (SETTINGS / HEADERS / DATA / RST_STREAM / WINDOW_UPDATE / PING / GOAWAY), the stream state machine, multiplexing, and flow control over `moonbitlang/async` TCP sockets; then unary + server / client / bidirectional streaming, full metadata / deadlines / interceptors, and reflection / health / channelz. Note: the async TLS layer exposes no ALPN, so `h2` runs via **h2c** (prior-knowledge / upgrade) until an ALPN hook lands upstream. A gRPC-Web-over-HTTP/1.1 milestone (servable today by `mooncat`) validates the dispatch/codec/status stack while the h2 layer is built.
+`v0` = framing + status + method descriptors; `v0.2` = the first **HPACK** primitives (static table + integer representation + non-Huffman string literals). `v0.3` self-builds the load-bearing transport primitives: the **HTTP/2 frame layer** (all ten types — DATA / HEADERS / PRIORITY / RST_STREAM / SETTINGS / PUSH_PROMISE / PING / GOAWAY / WINDOW_UPDATE / CONTINUATION — with flags and payloads), the connection preface, the **stream state machine** (§5.1 + §5.1.1 id rules), and **complete HPACK** (Huffman coding + the dynamic table with eviction + the stateful encoder/decoder). Next: the connection multiplexer, connection-level and stream-level flow control over `moonbitlang/async` TCP sockets; then `application/grpc+proto` transport with unary + server / client / bidirectional streaming, full metadata / deadlines / interceptors, and reflection / health / channelz. Note: the async TLS layer exposes no ALPN, so `h2` runs via **h2c** (prior-knowledge / upgrade) until an ALPN hook lands upstream.
 
 ## License
 
