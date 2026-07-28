@@ -1,0 +1,8 @@
+// moonrpc (<- gRPC). The north star is REAL gRPC: a self-built HTTP/2 (RFC 7540)
+// + HPACK (RFC 7541) transport with stream multiplexing — not gRPC-Web. v0 lands
+// the wire primitives shared by every gRPC transport: the length-prefixed message
+// framing and the status model. Pure logic; the h2 stack (h2c path, since the
+// async TLS layer exposes no ALPN) is sequenced after.
+import {
+  "moonbitlang/core/buffer",
+}
