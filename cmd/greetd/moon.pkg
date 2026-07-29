@@ -1,0 +1,12 @@
+import {
+  "Lfan-ke/moonrpc",
+  "Lfan-ke/moonrpc/net",
+  "moonbitlang/async",
+  "moonbitlang/core/env",
+  "moonbitlang/core/string",
+}
+
+options(
+  "is-main": true,
+  supported_targets: "native",
+)

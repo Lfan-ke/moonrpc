@@ -48,3 +48,53 @@ jobs:
       - name: lint (fmt is clean)
         run: |
           moon fmt && git diff --exit-code
+
+  # Real third-party gRPC interop: a genuine `grpcurl` client (Go, unrelated codebase)
+  # discovers the moonrpc server via Server Reflection and calls it. This proves the
+  # self-built HTTP/2 + HPACK + gRPC framing + trailers + descriptor bytes actually
+  # interoperate with a foreign, unforgiving client — not just moonrpc talking to
+  # itself. A transport regression makes the grep assertions fail.
+  grpcurl-interop:
+    name: real gRPC interop (grpcurl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: install moon
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> $GITHUB_PATH
+
+      - name: post install
+        run: |
+          moon version --all
+          moon update
+
+      - name: install grpcurl
+        run: go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+
+      - name: build the moonrpc greeter server
+        run: moon build --target native
+
+      - name: grpcurl list / describe / call against the moonrpc server
+        run: |
+          set -euo pipefail
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          BIN=$(find _build/native -type f -name greetd | head -1)
+          echo "server: $BIN"
+          "$BIN" 50051 &
+          SRV=$!
+          trap 'kill $SRV 2>/dev/null || true' EXIT
+          sleep 3
+          echo "== list (Server Reflection) =="
+          grpcurl -plaintext -max-time 10 localhost:50051 list | tee /tmp/list.txt
+          grep -q '^greet.Greeter$' /tmp/list.txt
+          echo "== describe =="
+          grpcurl -plaintext -max-time 10 localhost:50051 describe greet.Greeter | tee /tmp/desc.txt
+          grep -q 'rpc SayHello' /tmp/desc.txt
+          echo "== unary call =="
+          grpcurl -plaintext -max-time 10 -d '{"name":"world"}' localhost:50051 greet.Greeter/SayHello | tee /tmp/call.txt
+          grep -q 'Hello, world' /tmp/call.txt
+          echo "grpcurl interop OK"
