@@ -9,6 +9,16 @@ SECTIONS = [
     ("rpc", "rpc.mbt", "Framing & status",
      "encode_message / decode_message implement gRPC length-prefixed framing; "
      "Status is the 17-code grpc-status model; Method renders the /Service/Method path."),
+    ("protobuf", "protobuf.mbt", "Protobuf wire runtime",
+     "The pure protobuf binary wire codec: PbWriter / PbReader carry the four proto3 "
+     "wire types (varint, fixed32/64, length-delimited) plus zigzag for the sint types, "
+     "with tag packing, unknown-field skipping, and truncation / overflow / group-type "
+     "rejection on decode."),
+    ("descriptor", "descriptor.mbt", "Descriptor model",
+     "The descriptor model for services and messages and its codec to the "
+     "FileDescriptorProto / FileDescriptorSet wire bytes of descriptor.proto — the unit "
+     "Server Reflection returns, encoding from a programmatic model and decoding a "
+     "protoc-produced FileDescriptorSet through the same types."),
     ("hpack", "hpack.mbt", "HPACK primitives",
      "The RFC 7541 header-compression primitives: the 61-entry static table, the "
      "prefix-integer representation (§5.1), and non-Huffman string literals (§5.2)."),
@@ -50,6 +60,11 @@ SECTIONS = [
     ("health", "health.mbt", "Health service",
      "The grpc.health.v1.Health service (Check + Watch) with a hand-coded protobuf codec for "
      "its two messages and a per-service ServingStatus table."),
+    ("reflection", "reflection.mbt", "Server Reflection service",
+     "The grpc.reflection.v1.ServerReflection service (and its v1alpha alias) as a bidi "
+     "stream: ListServices enumerates registered services, FileContainingSymbol and "
+     "FileByFilename return the real FileDescriptorProto bytes, so a reflection client "
+     "such as grpcurl can list and describe a service."),
     ("net", "net/serve.mbt", "h2c socket transport (native)",
      "The native driver that pumps bytes between a real @socket.Tcp connection and the "
      "H2Server engine: GrpcServer registers handlers of every call kind and serves them "

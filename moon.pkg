@@ -5,4 +5,5 @@
 // async TLS layer exposes no ALPN) is sequenced after.
 import {
   "moonbitlang/core/buffer",
+  "moonbitlang/core/encoding/utf8",
 }

@@ -109,6 +109,18 @@ pub fn GrpcServer::register_bidi(
 }
 
 ///|
+/// Register the `grpc.reflection.v1.ServerReflection` service (and its v1alpha
+/// alias) so a reflection client such as `grpcurl` can list and describe the
+/// services in `refl`'s descriptor database.
+pub fn GrpcServer::register_reflection(
+  self : GrpcServer,
+  refl : @moonrpc.ReflectionService,
+) -> Unit {
+  self.handlers[@moonrpc.reflection_v1_path] = refl.handler()
+  self.handlers[@moonrpc.reflection_v1alpha_path] = refl.handler()
+}
+
+///|
 /// Build a fresh per-connection engine seeded with this server's handlers.
 fn GrpcServer::engine(self : GrpcServer) -> @moonrpc.H2Server {
   let e = @moonrpc.H2Server::new()
@@ -234,10 +246,10 @@ async test "unary gRPC call served over the self-built h2c transport" {
   @async.with_task_group(g => {
     let server = GrpcServer::new()
     server.register("/echo.Echo/Say", req => cat(b"echo:", req))
-    let task = g.spawn(() => server.serve(port=50071))
+    let task = g.spawn(() => server.serve(port=18071))
     @async.sleep(300)
     let (status, grpc_status, reply) = unary_call(
-      "127.0.0.1", 50071, b"/echo.Echo/Say", b"world",
+      "127.0.0.1", 18071, b"/echo.Echo/Say", b"world",
     )
     assert_eq(status == b"200", true)
     assert_eq(grpc_status == b"0", true)
@@ -251,10 +263,10 @@ async test "an unregistered method is served UNIMPLEMENTED over h2c" {
   @async.with_task_group(g => {
     let server = GrpcServer::new()
     server.register("/echo.Echo/Say", req => req)
-    let task = g.spawn(() => server.serve(port=50072))
+    let task = g.spawn(() => server.serve(port=18072))
     @async.sleep(300)
     let (_status, grpc_status, _reply) = unary_call(
-      "127.0.0.1", 50072, b"/echo.Echo/Missing", b"x",
+      "127.0.0.1", 18072, b"/echo.Echo/Missing", b"x",
     )
     assert_eq(grpc_status == b"12", true)
     task.cancel()
@@ -368,11 +380,11 @@ async test "server-streaming: a real h2c call receives multiple framed replies i
     server.register_server_streaming("/count.C/Up", (_ctx, req) => {
       [cat(req, b"-1"), cat(req, b"-2"), cat(req, b"-3")]
     })
-    let task = g.spawn(() => server.serve(port=50073))
+    let task = g.spawn(() => server.serve(port=18073))
     @async.sleep(300)
     let (status, grpc_status, replies) = streaming_call(
       "127.0.0.1",
-      50073,
+      18073,
       b"/count.C/Up",
       [b"n"],
     )
@@ -399,11 +411,11 @@ async test "client-streaming: a real h2c call sends many messages and gets one r
       }
       buf.to_bytes()
     })
-    let task = g.spawn(() => server.serve(port=50074))
+    let task = g.spawn(() => server.serve(port=18074))
     @async.sleep(300)
     let (status, grpc_status, replies) = streaming_call(
       "127.0.0.1",
-      50074,
+      18074,
       b"/sum.S/Add",
       [b"a", b"b", b"c"],
     )
@@ -423,11 +435,11 @@ async test "bidi-streaming: a real h2c call echoes each message and closes with 
       on_message: m => [cat(b"re:", m)],
       on_end: () => [b"bye"],
     })
-    let task = g.spawn(() => server.serve(port=50075))
+    let task = g.spawn(() => server.serve(port=18075))
     @async.sleep(300)
     let (status, grpc_status, replies) = streaming_call(
       "127.0.0.1",
-      50075,
+      18075,
       b"/chat.C/Echo",
       [b"one", b"two"],
     )
@@ -438,6 +450,105 @@ async test "bidi-streaming: a real h2c call echoes each message and closes with 
     assert_eq(replies[0] == b"re:one", true)
     assert_eq(replies[1] == b"re:two", true)
     assert_eq(replies[2] == b"bye", true)
+    task.cancel()
+  })
+}
+
+///|
+/// The descriptor of a `greet.Greeter` service, registered with reflection so the
+/// in-process client below can discover it over the wire.
+fn greet_descriptor() -> @moonrpc.FileDescriptor {
+  @moonrpc.FileDescriptor::new(
+    "greet.proto",
+    "greet",
+    messages=[
+      @moonrpc.MessageDescriptor::{
+        name: "HelloRequest",
+        fields: [@moonrpc.FieldDescriptor::scalar("name", 1, TypeString)],
+      },
+    ],
+    services=[
+      @moonrpc.ServiceDescriptor::{
+        name: "Greeter",
+        methods: [
+          @moonrpc.MethodDescriptor::{
+            name: "SayHello",
+            input_type: ".greet.HelloRequest",
+            output_type: ".greet.HelloReply",
+            client_streaming: false,
+            server_streaming: false,
+          },
+        ],
+      },
+    ],
+  )
+}
+
+///|
+/// The end-to-end reflection milestone: a real bidi `ServerReflectionInfo` call
+/// over the self-built h2c transport. An in-process reflection client lists the
+/// server's services and describes one, receiving the real FileDescriptorProto
+/// bytes back over the socket — exactly what `grpcurl list` / `describe` drive.
+/// The mutation guard corrupts the transported descriptor and confirms the decode
+/// then fails, so the assertions are load-bearing.
+async test "reflection: a real h2c bidi call lists and describes a registered service" {
+  @async.with_task_group(g => {
+    let server = GrpcServer::new()
+    server.register("/greet.Greeter/SayHello", req => req)
+    let refl = @moonrpc.ReflectionService::new()
+    refl.add_file(greet_descriptor())
+    server.register_reflection(refl)
+    let task = g.spawn(() => server.serve(port=18076))
+    @async.sleep(300)
+    let refl_path = b"/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
+
+    // ListServices over the wire.
+    let (ls, ls_status, list_replies) = streaming_call(
+      "127.0.0.1",
+      18076,
+      refl_path,
+      [@moonrpc.encode_reflection_request(@moonrpc.ListServices("*"))],
+    )
+    assert_eq(ls == b"200", true)
+    assert_eq(ls_status == b"0", true)
+    assert_eq(list_replies.length(), 1)
+    match @moonrpc.decode_reflection_response(list_replies[0]) {
+      ServiceList(names) => assert_eq(names.contains("greet.Greeter"), true)
+      _ => abort("reflection ListServices did not return a service list")
+    }
+
+    // FileContainingSymbol over the wire -> a real FileDescriptorProto.
+    let (_fs, fs_status, desc_replies) = streaming_call(
+      "127.0.0.1",
+      18076,
+      refl_path,
+      [
+        @moonrpc.encode_reflection_request(
+          @moonrpc.FileContainingSymbol("greet.Greeter"),
+        ),
+      ],
+    )
+    assert_eq(fs_status == b"0", true)
+    let protos = match @moonrpc.decode_reflection_response(desc_replies[0]) {
+      FileDescriptors(p) => p
+      _ => abort("reflection FileContainingSymbol did not return descriptors")
+    }
+    assert_eq(protos.length(), 1)
+    let described = @moonrpc.FileDescriptor::decode(protos[0])
+    assert_eq(described.services[0].name == "Greeter", true)
+    assert_eq(described.name == "greet.proto", true)
+
+    // MUTATION: corrupt a varint (the first field's length prefix) in the exact
+    // bytes that came back over the socket -> the decode that just succeeded fails.
+    let arr = protos[0].to_array()
+    arr[1] = (0x7F).to_byte()
+    let broke = try {
+      let _ = @moonrpc.FileDescriptor::decode(Bytes::from_array(arr))
+      false
+    } catch {
+      _ => true
+    }
+    assert_eq(broke, true)
     task.cancel()
   })
 }

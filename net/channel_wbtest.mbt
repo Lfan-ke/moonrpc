@@ -11,9 +11,9 @@ async test "channel: unary and Health/Check over a real socket, multiplexed on o
     let health = @moonrpc.HealthService::new()
     health.set_status("pkg.Svc", @moonrpc.Serving)
     server.register_health(health)
-    let task = g.spawn(() => server.serve(port=50081))
+    let task = g.spawn(() => server.serve(port=18081))
     @async.sleep(300)
-    let chan = Channel::connect("127.0.0.1", 50081)
+    let chan = Channel::connect("127.0.0.1", 18081)
     // first call: stream id 1.
     let r1 = chan.unary("/echo.Echo/Say", b"world")
     assert_eq(r1.status == b"200", true)
@@ -44,9 +44,9 @@ async test "channel: a server-streaming call receives every framed reply in orde
     server.register_server_streaming("/count.C/Up", (_ctx, req) => {
       [cat(req, b"-1"), cat(req, b"-2"), cat(req, b"-3")]
     })
-    let task = g.spawn(() => server.serve(port=50082))
+    let task = g.spawn(() => server.serve(port=18082))
     @async.sleep(300)
-    let chan = Channel::connect("127.0.0.1", 50082)
+    let chan = Channel::connect("127.0.0.1", 18082)
     let reply = chan.server_streaming("/count.C/Up", b"n")
     assert_eq(reply.grpc_status, 0)
     assert_eq(reply.messages.length(), 3)
@@ -71,9 +71,9 @@ async test "channel: a client-streaming call sends many messages for one reply o
       }
       buf.to_bytes()
     })
-    let task = g.spawn(() => server.serve(port=50083))
+    let task = g.spawn(() => server.serve(port=18083))
     @async.sleep(300)
-    let chan = Channel::connect("127.0.0.1", 50083)
+    let chan = Channel::connect("127.0.0.1", 18083)
     let reply = chan.client_streaming("/sum.S/Add", [b"a", b"b", b"c"])
     assert_eq(reply.grpc_status, 0)
     assert_eq(reply.messages.length(), 1)
@@ -114,7 +114,7 @@ async fn drive_slow(
 async test "channel: a call past its deadline is cancelled with DEADLINE_EXCEEDED" {
   @async.with_task_group(g => {
     let server = @socket.TcpServer::TcpServer(
-      @socket.Addr::parse("127.0.0.1:50084"),
+      @socket.Addr::parse("127.0.0.1:18084"),
       reuse_addr=true,
     )
     let task = g.spawn(() => {
@@ -127,7 +127,7 @@ async test "channel: a call past its deadline is cancelled with DEADLINE_EXCEEDE
       })
     })
     @async.sleep(300)
-    let chan = Channel::connect("127.0.0.1", 50084)
+    let chan = Channel::connect("127.0.0.1", 18084)
     // the server takes ~400ms to answer; the client's deadline is 120ms.
     let reply = chan.unary("/slow.S/Wait", b"x", timeout_millis=Some(120))
     assert_eq(reply.grpc_status, @moonrpc.Status::code(DeadlineExceeded))

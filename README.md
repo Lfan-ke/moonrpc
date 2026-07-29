@@ -78,6 +78,35 @@ engine.add_unary_interceptor((ctx, req, next) => {
 })
 ```
 
+## Protobuf and Server Reflection
+
+A pure protobuf wire runtime carries the proto3 binary format — varint, zigzag, `fixed32`/`fixed64`, and length-delimited fields — as a `PbWriter`/`PbReader` pair that every message serialises through on every backend:
+
+```moonbit
+let w = @moonrpc.PbWriter::new()
+w.string_(1, "testing")          // field 1, a length-delimited string
+w.int32(2, -1)                   // field 2, a varint (negative -> ten octets)
+let r = @moonrpc.PbReader::new(w.to_bytes())
+let (field, wire) = r.read_tag() // (1, LengthDelim)
+r.read_string()                  // "testing"
+```
+
+On top of it, a descriptor model builds `FileDescriptorProto` / `FileDescriptorSet` bytes (and decodes a `protoc`-produced set back), and the standard `grpc.reflection.v1.ServerReflection` service answers a reflection client over the same h2c transport — `ListServices` to enumerate, `FileContainingSymbol` / `FileByFilename` to describe:
+
+```moonbit
+let greeter : @moonrpc.ServiceDescriptor = {
+  name: "Greeter",
+  methods: [
+    { name: "SayHello", input_type: ".greet.HelloRequest",
+      output_type: ".greet.HelloReply",
+      client_streaming: false, server_streaming: false },
+  ],
+}
+let refl = @moonrpc.ReflectionService::new()
+refl.add_file(@moonrpc.FileDescriptor::new("greet.proto", "greet", services=[greeter]))
+server.register_reflection(refl)   // a reflection client now lists + describes greet.Greeter
+```
+
 Under the hood, everything below `serve` is a **pure, transport-independent engine** — `feed` turns a stream of decoded frames into the frames to write back, so the whole server path (HPACK, flow control, dispatch, HEADERS + DATA + `grpc-status` trailers) is exercised in-memory on **every backend**; only the socket driver is native.
 
 ```moonbit
@@ -158,7 +187,9 @@ m.path()                                 // "/greet.Greeter/SayHello"
 
 `v0.6` adds the client half and the gRPC cross-cutting services. A real **Channel** — a long-lived, multiplexed h2c connection over a real `@socket.Tcp`, driven by a pure `H2Client` engine symmetric to the server — opens streams (client-allocated odd ids), HPACK-encodes request HEADERS, frames request DATA under the send windows, and reassembles the reply. It performs unary, server- and client-streaming calls against a real `GrpcServer` over an actual socket. The **`grpc.health.v1.Health`** service (Check + Watch) ships with a hand-coded protobuf codec for its two messages. Server-side unary and stream **interceptors** wrap a handler in an outermost-first chain that can rewrite the request, post-process the reply, or short-circuit. The **`grpc-timeout` deadline** is now enforced client-side: the Channel races the read loop against the timer and, when it elapses, resets the stream and surfaces `DEADLINE_EXCEEDED`.
 
-Next: Server Reflection (so `grpcurl` can list/describe), the full protobuf message runtime, `-bin` metadata round-trip, rich errors (`google.rpc.Status`), per-message gzip, and channelz; plus DNS/load-balancing and retry on the Channel.
+`v0.6.1` self-builds the **protobuf wire runtime** and **Server Reflection**. A pure `PbWriter`/`PbReader` pair encodes and decodes the proto3 binary format (varint, zigzag, `fixed32`/`fixed64`, length-delimited, tag packing, unknown-field skipping, and truncation/overflow/group-type rejection). A descriptor model builds and parses `FileDescriptorProto` / `FileDescriptorSet` bytes, and the `grpc.reflection.v1.ServerReflection` service (with its `v1alpha` alias) answers `ListServices`, `FileContainingSymbol`, and `FileByFilename` as a bidi stream, returning the real descriptor bytes. An in-process reflection client, over an actual socket, lists and describes a registered service end-to-end, and the varint/descriptor path is mutation-verified.
+
+Next: `grpcurl` interop in CI, `-bin` metadata round-trip, rich errors (`google.rpc.Status`), per-message gzip, and channelz; plus DNS/load-balancing and retry on the Channel.
 
 ## License
 
