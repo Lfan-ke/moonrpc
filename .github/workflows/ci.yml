@@ -75,16 +75,25 @@ jobs:
       - name: install grpcurl
         run: go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
 
+      - name: build the greeter server
+        run: moon build --target native
+
       - name: grpcurl list / describe / call against the moonrpc server
         run: |
           set -euo pipefail
           export PATH="$PATH:$(go env GOPATH)/bin"
-          # `moon run` builds and launches the native greeter; run it in the
-          # background and let the job teardown reap it.
+          # `moon run` launches the (already-built) native greeter in the background;
+          # the job teardown reaps it.
           moon run cmd/greetd --target native -- 50051 &
           SRV=$!
           trap 'kill $SRV 2>/dev/null || true' EXIT
-          sleep 6
+          # Wait for the server to accept connections rather than guessing a sleep.
+          for i in $(seq 1 30); do
+            if grpcurl -plaintext -max-time 2 127.0.0.1:50051 list >/dev/null 2>&1; then
+              echo "server ready after ${i}s"; break
+            fi
+            sleep 1
+          done
           echo "== list (Server Reflection) =="
           grpcurl -plaintext -max-time 10 127.0.0.1:50051 list | tee /tmp/list.txt
           grep -q '^greet.Greeter$' /tmp/list.txt
