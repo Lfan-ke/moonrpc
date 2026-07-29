@@ -6,7 +6,8 @@ import {
   "moonbitlang/core/string",
 }
 
+pkgtype(kind: "executable")
+
 options(
-  "is-main": true,
   supported_targets: "native",
 )

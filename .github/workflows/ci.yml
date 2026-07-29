@@ -89,12 +89,12 @@ jobs:
           trap 'kill $SRV 2>/dev/null || true' EXIT
           sleep 3
           echo "== list (Server Reflection) =="
-          grpcurl -plaintext -max-time 10 localhost:50051 list | tee /tmp/list.txt
+          grpcurl -plaintext -max-time 10 127.0.0.1:50051 list | tee /tmp/list.txt
           grep -q '^greet.Greeter$' /tmp/list.txt
           echo "== describe =="
-          grpcurl -plaintext -max-time 10 localhost:50051 describe greet.Greeter | tee /tmp/desc.txt
+          grpcurl -plaintext -max-time 10 127.0.0.1:50051 describe greet.Greeter | tee /tmp/desc.txt
           grep -q 'rpc SayHello' /tmp/desc.txt
           echo "== unary call =="
-          grpcurl -plaintext -max-time 10 -d '{"name":"world"}' localhost:50051 greet.Greeter/SayHello | tee /tmp/call.txt
+          grpcurl -plaintext -max-time 10 -d '{"name":"world"}' 127.0.0.1:50051 greet.Greeter/SayHello | tee /tmp/call.txt
           grep -q 'Hello, world' /tmp/call.txt
           echo "grpcurl interop OK"
