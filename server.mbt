@@ -45,6 +45,7 @@ pub(all) struct SrvStream {
   mut finalized : Bool
   mut trailers_only : Bool
   mut status_code : Int
+  mut status_message : String
   mut headers_sent : Bool
   mut trailers_sent : Bool
   mut bidi : BidiHandler?
@@ -74,6 +75,7 @@ fn SrvStream::new(id : Int, send_window : Int) -> SrvStream {
     finalized: false,
     trailers_only: false,
     status_code: 0,
+    status_message: "",
     headers_sent: false,
     trailers_sent: false,
     bidi: None,
@@ -212,6 +214,28 @@ fn bytes_to_ascii(b : Bytes) -> String {
     sb.write_char(b[i].to_int().unsafe_to_char())
   }
   sb.to_string()
+}
+
+///|
+/// Percent-encode a `grpc-message` value (gRPC spec §"Responses"): a UTF-8 string
+/// whose bytes outside printable ASCII `%x20-%x7E`, and `%` itself, are written as
+/// `%XX` with uppercase hex. Lets a status message carry spaces, punctuation, and
+/// non-ASCII text on the header line safely.
+fn percent_encode(msg : String) -> Bytes {
+  let src = @utf8.encode(msg)
+  let buf = Buffer()
+  for i = 0; i < src.length(); i = i + 1 {
+    let c = src[i].to_int()
+    if c >= 0x20 && c <= 0x7E && c != 0x25 {
+      buf.write_byte(src[i])
+    } else {
+      let hex = "0123456789ABCDEF"
+      buf.write_byte(b'%')
+      buf.write_byte(hex[(c >> 4) & 0xf].to_int().to_byte())
+      buf.write_byte(hex[c & 0xf].to_int().to_byte())
+    }
+  }
+  buf.to_bytes()
 }
 
 ///|
@@ -452,6 +476,7 @@ fn H2Server::complete_headers(self : H2Server, s : SrvStream) -> Unit raise {
     deadline_millis: deadline,
     resp_headers: [],
     resp_trailers: [],
+    status_fail: None,
   }
   s.headers_complete = true
 }
@@ -473,6 +498,7 @@ fn H2Server::advance(self : H2Server, s : SrvStream) -> Array[Frame] raise {
       None => {
         s.trailers_only = true
         s.status_code = Status::code(Unimplemented)
+        s.status_message = "method not found"
         s.response_ended = true
       }
     }
@@ -519,28 +545,49 @@ fn H2Server::finalize(self : H2Server, s : SrvStream) -> Unit {
     Some(Unary(h)) => {
       let msg = if s.req_msgs.length() > 0 { s.req_msgs[0] } else { b"" }
       let effective = compose_unary(self.unary_interceptors, h)
-      self.enqueue(s, effective(s.ctx, msg))
+      self.deliver(s, [effective(s.ctx, msg)])
     }
     Some(ServerStreaming(h)) => {
       let msg = if s.req_msgs.length() > 0 { s.req_msgs[0] } else { b"" }
       let effective = compose_stream(self.stream_interceptors, h)
-      for r in effective(s.ctx, msg) {
-        self.enqueue(s, r)
-      }
+      self.deliver(s, effective(s.ctx, msg))
     }
-    Some(ClientStreaming(h)) => self.enqueue(s, h(s.ctx, s.req_msgs))
+    Some(ClientStreaming(h)) => self.deliver(s, [h(s.ctx, s.req_msgs)])
     Some(Bidi(_)) =>
       match s.bidi {
-        Some(bh) =>
-          for r in (bh.on_end)() {
-            self.enqueue(s, r)
-          }
+        Some(bh) => self.deliver(s, (bh.on_end)())
         None => ()
       }
     None => ()
   }
   s.started_response = true
   s.response_ended = true
+}
+
+///|
+/// Enqueue a handler's reply messages, unless the handler ended the call with a
+/// non-OK status via `ctx.fail` — then set that status and drop the replies (a
+/// non-OK gRPC response carries no message body).
+fn H2Server::deliver(
+  self : H2Server,
+  s : SrvStream,
+  replies : Array[Bytes],
+) -> Unit {
+  match s.ctx.status_fail {
+    Some((code, message)) => {
+      s.status_code = code
+      s.status_message = message
+      // Nothing has been written yet ⇒ trailers-only; otherwise the status rides
+      // the closing trailers after whatever was already sent.
+      if !s.started_response {
+        s.trailers_only = true
+      }
+    }
+    None =>
+      for r in replies {
+        self.enqueue(s, r)
+      }
+  }
 }
 
 ///|
@@ -557,7 +604,7 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
         { name: b":status", value: b"200" },
         { name: b"content-type", value: b"application/grpc" },
         { name: b"grpc-status", value: int_to_ascii_bytes(s.status_code) },
-        { name: b"grpc-message", value: b"method not found" },
+        { name: b"grpc-message", value: percent_encode(s.status_message) },
       ])
       frames.push(
         Headers(
@@ -621,6 +668,14 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
     let trailers : Array[Header] = [
       { name: b"grpc-status", value: int_to_ascii_bytes(s.status_code) },
     ]
+    // A non-OK status that surfaced after the body already started rides the closing
+    // trailers together with its message.
+    if s.status_code != 0 && s.status_message != "" {
+      trailers.push({
+        name: b"grpc-message",
+        value: percent_encode(s.status_message),
+      })
+    }
     for h in s.ctx.resp_trailers {
       trailers.push(h)
     }

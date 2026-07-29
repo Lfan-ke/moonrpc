@@ -16,6 +16,10 @@ pub(all) struct RpcContext {
   deadline_millis : Int?
   resp_headers : Array[Header]
   resp_trailers : Array[Header]
+  // Set by a handler that wants to end the call with a non-OK gRPC status
+  // (`(code, message)`); the server emits it as the `grpc-status` / `grpc-message`
+  // trailer and discards any reply the handler also returned.
+  mut status_fail : (Int, String)?
 }
 
 ///|
@@ -28,7 +32,22 @@ pub fn RpcContext::empty() -> RpcContext {
     deadline_millis: None,
     resp_headers: [],
     resp_trailers: [],
+    status_fail: None,
   }
+}
+
+///|
+/// End the call with a non-OK gRPC status. A handler calls this (e.g.
+/// `ctx.fail(Status::code(NotFound), "user 42 does not exist")`) instead of
+/// returning a normal reply; the server sends the `grpc-status` / `grpc-message`
+/// trailer and drops the reply message. The five common codes have named helpers on
+/// [`Status`]; any code is accepted.
+pub fn RpcContext::fail(
+  self : RpcContext,
+  code : Int,
+  message : String,
+) -> Unit {
+  self.status_fail = Some((code, message))
 }
 
 ///|

@@ -202,3 +202,15 @@ test "engine: a small send window splits the reply and a WINDOW_UPDATE releases 
   assert_eq(trailer_seen.val, true)
   assert_eq(engine.stream_state(1), Closed)
 }
+
+///|
+test "percent_encode follows the grpc-message spec" {
+  // Printable ASCII (incl. space) passes through unchanged.
+  assert_eq(percent_encode("name is required") == b"name is required", true)
+  // '%' itself is escaped.
+  assert_eq(percent_encode("50%") == b"50%25", true)
+  // Non-ASCII is escaped byte-by-byte over its UTF-8 encoding (é = C3 A9).
+  assert_eq(percent_encode("é") == b"%C3%A9", true)
+  // Control characters are escaped (newline 0x0A).
+  assert_eq(percent_encode("a\nb") == b"a%0Ab", true)
+}

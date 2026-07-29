@@ -91,7 +91,16 @@ jobs:
           echo "== describe =="
           grpcurl -plaintext -max-time 10 127.0.0.1:50051 describe greet.Greeter | tee /tmp/desc.txt
           grep -q 'rpc SayHello' /tmp/desc.txt
-          echo "== unary call =="
+          echo "== unary call (OK) =="
           grpcurl -plaintext -max-time 10 -d '{"name":"world"}' 127.0.0.1:50051 greet.Greeter/SayHello | tee /tmp/call.txt
           grep -q 'Hello, world' /tmp/call.txt
+          echo "== unary call (non-OK status via ctx.fail) =="
+          # An empty name must come back as INVALID_ARGUMENT with its message; grpcurl
+          # exits non-zero, so capture rather than let `set -e` abort.
+          set +e
+          grpcurl -plaintext -max-time 10 -d '{"name":""}' 127.0.0.1:50051 greet.Greeter/SayHello 2>/tmp/err.txt
+          set -e
+          cat /tmp/err.txt
+          grep -q 'InvalidArgument' /tmp/err.txt
+          grep -q 'name is required' /tmp/err.txt
           echo "grpcurl interop OK"

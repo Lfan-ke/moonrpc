@@ -5,8 +5,9 @@
 
 ///|
 /// Unary `greet.Greeter/SayHello`: decode `HelloRequest { name = 1 }`, reply with
-/// `HelloReply { message = 1 }`.
-fn say_hello(req : Bytes) -> Bytes {
+/// `HelloReply { message = 1 }`. An empty name ends the call with `INVALID_ARGUMENT`
+/// via `ctx.fail`, exercising the non-OK status path against a real client.
+fn say_hello(ctx : @moonrpc.RpcContext, req : Bytes) -> Bytes {
   let name = try {
     let r = @moonrpc.PbReader::new(req)
     let mut n = ""
@@ -21,6 +22,10 @@ fn say_hello(req : Bytes) -> Bytes {
     n
   } catch {
     _ => ""
+  }
+  if name == "" {
+    ctx.fail(@moonrpc.Status::code(InvalidArgument), "name is required")
+    return b""
   }
   let w = @moonrpc.PbWriter::new()
   w.string_(1, "Hello, " + name)
@@ -69,7 +74,7 @@ fn main {
   }
   @async.run_async_main(() => {
     let server = @net.GrpcServer::new()
-    server.register("/greet.Greeter/SayHello", say_hello)
+    server.register_unary("/greet.Greeter/SayHello", say_hello)
     let refl = @moonrpc.ReflectionService::new()
     refl.add_file(greet_file())
     server.register_reflection(refl)

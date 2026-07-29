@@ -77,6 +77,17 @@ pub fn GrpcServer::register(
 }
 
 ///|
+/// Register a unary handler that receives the [`RpcContext`], so it can read request
+/// metadata / the deadline and end the call with a non-OK status via `ctx.fail`.
+pub fn GrpcServer::register_unary(
+  self : GrpcServer,
+  path : String,
+  handler : (@moonrpc.RpcContext, Bytes) -> Bytes,
+) -> Unit {
+  self.handlers[path] = Unary(handler)
+}
+
+///|
 /// Register a server-streaming handler: one request message in, an ordered
 /// sequence of reply messages out.
 pub fn GrpcServer::register_server_streaming(
