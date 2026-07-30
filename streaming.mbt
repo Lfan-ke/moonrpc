@@ -128,21 +128,29 @@ pub fn parse_grpc_timeout(v : Bytes) -> Int? {
   if v.length() < 2 {
     return None
   }
-  let mut n = 0
+  // RFC: at most 8 ASCII digits before the unit. More than that is malformed, not a
+  // huge deadline — rejecting it also keeps the value inside the 64-bit accumulator.
+  if v.length() - 1 > 8 {
+    return None
+  }
+  let mut n : Int64 = 0
   for i = 0; i < v.length() - 1; i = i + 1 {
     let c = v[i].to_int()
     if c < 0x30 || c > 0x39 {
       return None
     }
-    n = n * 10 + (c - 0x30)
+    n = n * 10 + (c - 0x30).to_int64()
   }
-  match v[v.length() - 1] {
-    b'H' => Some(n * 3600 * 1000)
-    b'M' => Some(n * 60 * 1000)
-    b'S' => Some(n * 1000)
-    b'm' => Some(n)
-    b'u' => Some(n / 1000)
-    b'n' => Some(n / 1000000)
-    _ => None
+  let millis : Int64 = match v[v.length() - 1] {
+    b'H' => n * 3600 * 1000
+    b'M' => n * 60 * 1000
+    b'S' => n * 1000
+    b'm' => n
+    b'u' => n / 1000
+    b'n' => n / 1000000
+    _ => return None
   }
+  // Clamp to a representable millisecond deadline: an 8-digit hour value exceeds a
+  // 32-bit Int, so saturate rather than wrap to a negative (past) deadline.
+  Some(if millis > 0x7FFFFFFFL { 0x7FFFFFFF } else { millis.to_int() })
 }

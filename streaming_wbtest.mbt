@@ -328,4 +328,9 @@ test "grpc-timeout parses every unit to milliseconds" {
   assert_eq(parse_grpc_timeout(b"") == None, true)
   assert_eq(parse_grpc_timeout(b"9X") == None, true)
   assert_eq(parse_grpc_timeout(b"aS") == None, true)
+  // More than 8 digits is malformed (RFC), not a giant deadline.
+  assert_eq(parse_grpc_timeout(b"999999999S") == None, true)
+  // An 8-digit hour value overflows a 32-bit millisecond count; it saturates at
+  // Int.MAX rather than wrapping to a negative (already-past) deadline.
+  assert_eq(parse_grpc_timeout(b"99999999H") == Some(2147483647), true)
 }
