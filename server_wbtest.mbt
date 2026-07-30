@@ -256,3 +256,48 @@ test "engine: a compressed request under an unsupported encoding gets UNIMPLEMEN
   }
   assert_eq(grpc_status == b"12", true)
 }
+
+///|
+test "emit_header_frames splits a block larger than max_frame into HEADERS + CONTINUATION" {
+  // 10-byte block, max_frame 4 -> HEADERS(4, end_headers=false) + CONTINUATION(4) +
+  // CONTINUATION(2, end_headers=true).
+  let frames = emit_header_frames(1, b"0123456789", true, 4)
+  assert_eq(frames.length(), 3)
+  match frames[0] {
+    Headers(fragment~, end_headers~, end_stream~, ..) => {
+      assert_eq(end_headers, false)
+      assert_eq(end_stream, true)
+      assert_eq(fragment == b"0123", true)
+    }
+    _ => abort("expected HEADERS")
+  }
+  match frames[1] {
+    Continuation(fragment~, end_headers~, ..) => {
+      assert_eq(end_headers, false)
+      assert_eq(fragment == b"4567", true)
+    }
+    _ => abort("expected CONTINUATION")
+  }
+  match frames[2] {
+    Continuation(fragment~, end_headers~, ..) => {
+      assert_eq(end_headers, true)
+      assert_eq(fragment == b"89", true)
+    }
+    _ => abort("expected CONTINUATION")
+  }
+  // A block within max_frame stays a single end_headers=true HEADERS.
+  assert_eq(emit_header_frames(1, b"ab", false, 4).length(), 1)
+}
+
+///|
+test "goaway emits a NO_ERROR GOAWAY carrying the last processed stream id" {
+  let out = H2Server::new().goaway(7)
+  assert_eq(out.length(), 1)
+  match out[0] {
+    GoAway(last_stream_id~, error_code~, ..) => {
+      assert_eq(last_stream_id, 7)
+      assert_eq(error_code, error_no_error)
+    }
+    _ => abort("expected GOAWAY")
+  }
+}

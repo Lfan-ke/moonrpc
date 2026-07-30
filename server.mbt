@@ -208,6 +208,16 @@ pub fn H2Server::preface(self : H2Server) -> Array[Frame] {
   [Settings(params=[(settings_enable_push, 0)], ack=false)]
 }
 
+///|
+/// Frames for a graceful shutdown: a GOAWAY announcing `last_stream_id` — the highest
+/// client stream the server will still process (RFC 7540 §6.8) — with NO_ERROR, so
+/// the peer opens no new streams while in-flight ones finish. The driver writes these
+/// before closing the connection.
+pub fn H2Server::goaway(self : H2Server, last_stream_id : Int) -> Array[Frame] {
+  ignore(self)
+  [GoAway(last_stream_id~, error_code=error_no_error, debug=b"")]
+}
+
 // -- small octet helpers ----------------------------------------------------
 
 ///|
@@ -219,6 +229,61 @@ fn bytes_to_ascii(b : Bytes) -> String {
     sb.write_char(b[i].to_int().unsafe_to_char())
   }
   sb.to_string()
+}
+
+///|
+/// Frame an HPACK header block as HEADERS plus, when it exceeds the peer's
+/// `SETTINGS_MAX_FRAME_SIZE`, one or more CONTINUATION frames (RFC 7540 §4.3 / §6.10):
+/// the block is split into `max_frame`-sized fragments, the first a HEADERS with
+/// `end_headers=false`, the rest CONTINUATION, the last carrying `end_headers=true`.
+fn emit_header_frames(
+  stream_id : Int,
+  block : Bytes,
+  end_stream : Bool,
+  max_frame : Int,
+) -> Array[Frame] {
+  let frames : Array[Frame] = []
+  if block.length() <= max_frame {
+    frames.push(
+      Headers(
+        stream_id~,
+        fragment=block,
+        end_stream~,
+        end_headers=true,
+        priority=None,
+        padding=0,
+      ),
+    )
+    return frames
+  }
+  frames.push(
+    Headers(
+      stream_id~,
+      fragment=block[0:max_frame].to_owned(),
+      end_stream~,
+      end_headers=false,
+      priority=None,
+      padding=0,
+    ),
+  )
+  let mut off = max_frame
+  while off < block.length() {
+    let n = if block.length() - off < max_frame {
+      block.length() - off
+    } else {
+      max_frame
+    }
+    let chunk = block[off:off + n].to_owned()
+    off = off + n
+    frames.push(
+      Continuation(
+        stream_id~,
+        fragment=chunk,
+        end_headers=off >= block.length(),
+      ),
+    )
+  }
+  frames
 }
 
 ///|
@@ -666,16 +731,9 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
         })
       }
       let block = self.encoder.encode(tr)
-      frames.push(
-        Headers(
-          stream_id=s.id,
-          fragment=block,
-          end_stream=true,
-          end_headers=true,
-          priority=None,
-          padding=0,
-        ),
-      )
+      for f in emit_header_frames(s.id, block, true, self.remote_max_frame) {
+        frames.push(f)
+      }
       s.state = s.state.on_send(Headers(end_stream=true))
       s.trailers_sent = true
     }
@@ -695,16 +753,9 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
       })
     }
     let block = self.encoder.encode(headers)
-    frames.push(
-      Headers(
-        stream_id=s.id,
-        fragment=block,
-        end_stream=false,
-        end_headers=true,
-        priority=None,
-        padding=0,
-      ),
-    )
+    for f in emit_header_frames(s.id, block, false, self.remote_max_frame) {
+      frames.push(f)
+    }
     s.state = s.state.on_send(Headers(end_stream=false))
     s.headers_sent = true
   }
