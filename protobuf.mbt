@@ -330,7 +330,9 @@ pub fn PbReader::read_fixed64(self : PbReader) -> UInt64 raise PbError {
 /// Read a length-delimited body's raw bytes.
 pub fn PbReader::read_len_delim(self : PbReader) -> Bytes raise PbError {
   let len = self.read_varint().to_int()
-  if len < 0 || self.pos + len > self.data.length() {
+  // Compare against the bytes remaining rather than `pos + len`, which wraps negative
+  // for a length near Int.MAX and would slip past the guard into an OOB slice.
+  if len < 0 || len > self.data.length() - self.pos {
     raise Truncated
   }
   let out = self.data[self.pos:self.pos + len].to_owned()

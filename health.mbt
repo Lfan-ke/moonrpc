@@ -50,25 +50,6 @@ fn pb_write_varint(buf : Buffer, value : Int) -> Unit {
 }
 
 ///|
-/// Read a base-128 varint at `offset`, returning `(value, bytes_consumed)`.
-fn pb_read_varint(data : Bytes, offset : Int) -> (Int, Int) {
-  let mut value = 0
-  let mut shift = 0
-  let mut consumed = 0
-  let mut more = true
-  while more {
-    let octet = data[offset + consumed].to_int()
-    consumed = consumed + 1
-    value = value | ((octet & 0x7F) << shift)
-    shift = shift + 7
-    if (octet & 0x80) == 0 {
-      more = false
-    }
-  }
-  (value, consumed)
-}
-
-///|
 /// Encode a `HealthCheckRequest`: field 1 (`service`, a length-delimited string).
 /// An empty service name encodes to the empty message, the wire form of the
 /// overall-server check.
@@ -86,26 +67,21 @@ pub fn encode_health_request(service : Bytes) -> Bytes {
 /// Decode the `service` field of a `HealthCheckRequest`, or empty bytes when the
 /// field is absent (the overall-server check). Unknown fields are skipped.
 pub fn decode_health_request(msg : Bytes) -> Bytes {
-  let mut off = 0
+  let r = PbReader::new(msg)
   let mut service = b""
-  while off < msg.length() {
-    let (tag, tlen) = pb_read_varint(msg, off)
-    off = off + tlen
-    let field = tag >> 3
-    let wire = tag & 0x7
-    if wire == 2 {
-      let (len, llen) = pb_read_varint(msg, off)
-      off = off + llen
-      if field == 1 {
-        service = msg[off:off + len].to_owned()
+  // The bounded PbReader raises on any malformed/over-long field; a bad request then
+  // reads as the empty (overall-server) check rather than aborting the process.
+  try {
+    while !r.eof() {
+      let (field, wire) = r.read_tag()
+      if field == 1 && wire is LengthDelim {
+        service = r.read_bytes()
+      } else {
+        r.skip(wire)
       }
-      off = off + len
-    } else if wire == 0 {
-      let (_, vlen) = pb_read_varint(msg, off)
-      off = off + vlen
-    } else {
-      break
     }
+  } catch {
+    _ => ()
   }
   service
 }
@@ -126,25 +102,19 @@ pub fn encode_health_response(status : ServingStatus) -> Bytes {
 /// Decode the `status` field of a `HealthCheckResponse`; an absent field reads as
 /// the `0` default (`StatusUnknown`).
 pub fn decode_health_response(msg : Bytes) -> ServingStatus {
-  let mut off = 0
+  let r = PbReader::new(msg)
   let mut status = 0
-  while off < msg.length() {
-    let (tag, tlen) = pb_read_varint(msg, off)
-    off = off + tlen
-    let field = tag >> 3
-    let wire = tag & 0x7
-    if wire == 0 {
-      let (v, vlen) = pb_read_varint(msg, off)
-      off = off + vlen
-      if field == 1 {
-        status = v
+  try {
+    while !r.eof() {
+      let (field, wire) = r.read_tag()
+      if field == 1 && wire is Varint {
+        status = r.read_int32()
+      } else {
+        r.skip(wire)
       }
-    } else if wire == 2 {
-      let (len, llen) = pb_read_varint(msg, off)
-      off = off + llen + len
-    } else {
-      break
     }
+  } catch {
+    _ => ()
   }
   ServingStatus::from_code(status)
 }

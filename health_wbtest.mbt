@@ -71,3 +71,13 @@ test "health: a Watch call emits the current status as its first streamed messag
   assert_eq(reply.messages.length(), 1)
   assert_eq(decode_health_response(reply.messages[0]) == Serving, true)
 }
+
+///|
+test "health: a request declaring more bytes than present decodes safely, not a crash" {
+  // field 1, length-delimited, declared length 200, but only one body byte follows.
+  // The hand-rolled decoder used to slice out of bounds and abort; it now yields the
+  // empty (overall-server) service without crashing.
+  assert_eq(decode_health_request(b"\x0a\xc8\x01\x41") == b"", true)
+  // a truncated varint tag likewise decodes to empty rather than reading past the end.
+  assert_eq(decode_health_request(b"\xff") == b"", true)
+}

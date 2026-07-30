@@ -270,3 +270,18 @@ test "protobuf: map<string,string> entries and packed repeated int32 round-trip"
   assert_eq(entries[1].0 == "b" && entries[1].1 == "2", true)
   assert_eq(packed == [1, -1, 300, 0], true)
 }
+
+///|
+test "protobuf: a length-delimited field claiming a huge length raises, not aborts" {
+  // A varint length of 0x7FFFFFFF at a non-zero offset makes `pos + len` wrap negative;
+  // the guard must compare against the bytes remaining instead and raise Truncated.
+  let r = PbReader::new(b"\x0a\xff\xff\xff\xff\x07\x01\x02")
+  let raised = try {
+    let (_, _) = r.read_tag()
+    let _ = r.read_len_delim()
+    false
+  } catch {
+    _ => true
+  }
+  assert_eq(raised, true)
+}
