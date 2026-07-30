@@ -18,6 +18,22 @@ pub let default_window_size : Int = 65535
 pub let default_max_frame_size : Int = 16384
 
 ///|
+/// Add a flow-control increment to a window, saturating at the ±2^31-1 range RFC 7540
+/// §6.9.1 allows instead of wrapping. A wrap to a large negative window would stall
+/// every send on that stream/connection (a WINDOW_UPDATE-driven deadlock), and a wrap
+/// to a bogus positive one would over-send; the sum is taken in 64 bits and clamped.
+fn add_window(cur : Int, inc : Int) -> Int {
+  let sum = cur.to_int64() + inc.to_int64()
+  if sum > 0x7FFFFFFFL {
+    0x7FFFFFFF
+  } else if sum < -0x7FFFFFFFL {
+    -0x7FFFFFFF
+  } else {
+    sum.to_int()
+  }
+}
+
+///|
 /// One server-side stream: its lifecycle state, the accumulating request header
 /// block and DATA (with a cursor over the length-prefixed messages already pulled
 /// out of it), the per-stream flow-control windows, and the response side — the
@@ -114,6 +130,9 @@ pub struct H2Server {
   mut remote_initial_window : Int
   mut remote_max_frame : Int
   mut goaway_received : Bool
+  // The highest client stream id opened so far. A new HEADERS must use an odd id
+  // strictly greater than this (RFC 7540 §5.1.1); anything else is a PROTOCOL_ERROR.
+  mut last_client_stream : Int
 }
 
 ///|
@@ -132,6 +151,7 @@ pub fn H2Server::new() -> H2Server {
     remote_initial_window: default_window_size,
     remote_max_frame: default_max_frame_size,
     goaway_received: false,
+    last_client_stream: 0,
   }
 }
 
@@ -480,7 +500,7 @@ fn H2Server::apply_setting(self : H2Server, id : Int, value : Int) -> Unit {
     let delta = value - self.remote_initial_window
     self.remote_initial_window = value
     for _, s in self.streams {
-      s.send_window = s.send_window + delta
+      s.send_window = add_window(s.send_window, delta)
     }
   } else if id == settings_max_frame_size {
     // Clamp to the RFC 7540 §6.5.2 range [2^14, 2^24-1]; a smaller value (e.g. 0)
@@ -538,13 +558,26 @@ pub fn H2Server::feed(self : H2Server, frame : Frame) -> Array[Frame] raise {
     Ping(payload~, ack~) => if ack { [] } else { [Ping(payload~, ack=true)] }
     WindowUpdate(stream_id~, increment~) => {
       if stream_id == 0 {
-        self.conn_send_window = self.conn_send_window + increment
+        self.conn_send_window = add_window(self.conn_send_window, increment)
       } else {
-        self.stream(stream_id).send_window += increment
+        let s = self.stream(stream_id)
+        s.send_window = add_window(s.send_window, increment)
       }
       self.pump_all()
     }
     Headers(stream_id~, fragment~, end_stream~, end_headers~, ..) => {
+      // A HEADERS opening a new stream must carry an odd id strictly greater than any
+      // client stream seen (RFC 7540 §5.1.1); an even/zero/re-used id would otherwise
+      // silently open — or reopen — a stream on the wrong state.
+      if self.streams.get(stream_id) is None {
+        if !stream_is_client_initiated(stream_id) ||
+          stream_id <= self.last_client_stream {
+          raise InvalidTransition(
+            "invalid client stream id " + stream_id.to_string(),
+          )
+        }
+        self.last_client_stream = stream_id
+      }
       let s = self.stream(stream_id)
       s.state = s.state.on_recv(Headers(end_stream~))
       s.header_block.write_bytes(fragment)

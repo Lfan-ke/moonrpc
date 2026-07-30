@@ -259,6 +259,41 @@ test "engine: a compressed request under an unsupported encoding gets UNIMPLEMEN
 }
 
 ///|
+test "add_window saturates at 2^31-1 instead of wrapping negative" {
+  // A WINDOW_UPDATE that pushes the window past 2^31-1 must not wrap to a large
+  // negative window (which would stall every send); it saturates.
+  assert_eq(add_window(0x7FFFFFFF, 0x7FFFFFFF), 0x7FFFFFFF)
+  assert_eq(add_window(default_window_size, 1000), default_window_size + 1000)
+  assert_eq(add_window(100, -40), 60)
+}
+
+///|
+test "engine: a HEADERS on an even (server-initiated) stream id is a protocol error" {
+  let engine = H2Server::new()
+  engine.register("/e.E/M", req => req)
+  let enc = HpackEncoder::new()
+  let block = enc.encode([{ name: b":path", value: b"/e.E/M" }])
+  let _ = engine.feed(Settings(params=[], ack=false))
+  // Stream id 2 is even, so server-initiated — a client must not open it.
+  let raised = try {
+    let _ = engine.feed(
+      Headers(
+        stream_id=2,
+        fragment=block,
+        end_stream=true,
+        end_headers=true,
+        priority=None,
+        padding=0,
+      ),
+    )
+    false
+  } catch {
+    _ => true
+  }
+  assert_eq(raised, true)
+}
+
+///|
 test "engine: a message length prefix past the cap gets RESOURCE_EXHAUSTED, not a crash" {
   let engine = H2Server::new()
   engine.register("/echo.Echo/Say", req => req)

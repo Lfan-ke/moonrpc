@@ -308,10 +308,10 @@ pub fn H2Client::feed(self : H2Client, frame : Frame) -> Array[Frame] raise {
     Ping(payload~, ack~) => if ack { [] } else { [Ping(payload~, ack=true)] }
     WindowUpdate(stream_id~, increment~) => {
       if stream_id == 0 {
-        self.conn_send_window = self.conn_send_window + increment
+        self.conn_send_window = add_window(self.conn_send_window, increment)
       } else {
         match self.calls.get(stream_id) {
-          Some(c) => c.send_window = c.send_window + increment
+          Some(c) => c.send_window = add_window(c.send_window, increment)
           None => ()
         }
       }
@@ -425,7 +425,7 @@ fn H2Client::apply_setting(self : H2Client, id : Int, value : Int) -> Unit {
     let delta = value - self.remote_initial_window
     self.remote_initial_window = value
     for _, c in self.calls {
-      c.send_window = c.send_window + delta
+      c.send_window = add_window(c.send_window, delta)
     }
   } else if id == settings_max_frame_size {
     // Clamp to the RFC 7540 §6.5.2 range [2^14, 2^24-1].
