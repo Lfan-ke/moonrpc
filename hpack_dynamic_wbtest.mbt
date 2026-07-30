@@ -197,3 +197,33 @@ test "decoder rejects an out-of-range index" {
   }
   assert_eq(raised, true)
 }
+
+///|
+test "hpack: a truncated integer continuation raises instead of aborting the process" {
+  // 0xFF is an Indexed Header Field whose 7-bit prefix is all ones, so the integer
+  // needs a continuation octet that is not present. Before bounds-checking this was
+  // an uncatchable out-of-bounds read; it must now raise.
+  let dec = HpackDecoder::new()
+  let raised = try {
+    let _ = dec.decode(b"\xff")
+    false
+  } catch {
+    HpackDecodeError(_) => true
+    _ => false
+  }
+  assert_eq(raised, true)
+}
+
+///|
+test "hpack: a string literal longer than the block raises instead of aborting" {
+  // 0x41 = literal with incremental indexing, name index 1; 0xC8 = Huffman string of
+  // declared length 72 with only one byte following. The over-long length must raise.
+  let dec = HpackDecoder::new()
+  let raised = try {
+    let _ = dec.decode(b"\x41\xC8\x00")
+    false
+  } catch {
+    _ => true
+  }
+  assert_eq(raised, true)
+}

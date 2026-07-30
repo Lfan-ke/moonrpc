@@ -115,26 +115,40 @@ pub fn hpack_decode_int(
   data : Bytes,
   offset : Int,
   prefix_bits : Int,
-) -> (Int, Int) {
+) -> (Int, Int) raise HpackError {
+  if offset >= data.length() {
+    raise HpackDecodeError("truncated HPACK integer prefix")
+  }
   let max_prefix = (1 << prefix_bits) - 1
   let first = data[offset].to_int() & max_prefix
   if first < max_prefix {
     (first, 1)
   } else {
-    let mut value = max_prefix
+    // Accumulate in 64 bits and reject anything that would not fit a positive 32-bit
+    // Int (RFC 7541 §5.1), so a truncated or over-long continuation raises instead of
+    // reading past the buffer or overflowing.
+    let mut value = max_prefix.to_int64()
     let mut shift = 0
     let mut consumed = 1
-    let mut more = true
-    while more {
+    for ;; {
+      if offset + consumed >= data.length() {
+        raise HpackDecodeError("truncated HPACK integer")
+      }
+      if shift >= 35 {
+        raise HpackDecodeError("HPACK integer too long")
+      }
       let octet = data[offset + consumed].to_int()
       consumed = consumed + 1
-      value = value + (octet & 127) * (1 << shift)
+      value = value + (octet & 127).to_int64() * (1L << shift)
       shift = shift + 7
+      if value > 0x7FFFFFFFL {
+        raise HpackDecodeError("HPACK integer too large")
+      }
       if (octet & 128) == 0 {
-        more = false
+        break
       }
     }
-    (value, consumed)
+    (value.to_int(), consumed)
   }
 }
 
@@ -162,8 +176,16 @@ pub fn hpack_encode_string(octets : Bytes) -> Bytes {
 /// is masked off); this is the inverse of `hpack_encode_string` for `H = 0`.
 /// Use `hpack_string_is_huffman` first if the literal may be Huffman-coded, as
 /// Huffman decoding is not applied here.
-pub fn hpack_decode_string(data : Bytes, offset : Int) -> (Bytes, Int) {
+pub fn hpack_decode_string(
+  data : Bytes,
+  offset : Int,
+) -> (Bytes, Int) raise HpackError {
   let (len, int_len) = hpack_decode_int(data, offset, 7)
   let start = offset + int_len
+  // Bound the literal against the buffer without recomputing `start + len` (which
+  // could wrap), so a length claiming more than remains raises instead of slicing OOB.
+  if start > data.length() || len > data.length() - start {
+    raise HpackDecodeError("HPACK string literal runs past the block")
+  }
   (data[start:start + len].to_owned(), int_len + len)
 }
