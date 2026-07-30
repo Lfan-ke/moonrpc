@@ -84,14 +84,13 @@ async fn Channel::drive(
 }
 
 ///|
-/// Make a unary call: one request message, one reply. `timeout_millis`, when set, is
-/// sent as `grpc-timeout` and enforced locally.
-pub async fn Channel::unary(
+/// Issue one unary attempt on a fresh stream and drive it to its reply.
+async fn Channel::unary_once(
   self : Channel,
   path : String,
   request : Bytes,
-  metadata? : Array[@moonrpc.Header] = [],
-  timeout_millis? : Int? = None,
+  metadata : Array[@moonrpc.Header],
+  timeout_millis : Int?,
 ) -> @moonrpc.CallReply {
   let (id, frames) = self.engine.unary(
     path,
@@ -101,6 +100,36 @@ pub async fn Channel::unary(
   )
   write_frames(self.conn, frames)
   self.drive(id, timeout_millis)
+}
+
+///|
+/// Make a unary call: one request message, one reply. `timeout_millis`, when set, is
+/// sent as `grpc-timeout` and enforced locally. With a `retry` policy the call is
+/// re-issued on a new stream after a backoff sleep while its status is retryable and
+/// attempts remain — but only when it is still uncommitted (no reply message has
+/// arrived), as gRPC requires.
+pub async fn Channel::unary(
+  self : Channel,
+  path : String,
+  request : Bytes,
+  metadata? : Array[@moonrpc.Header] = [],
+  timeout_millis? : Int? = None,
+  retry? : @moonrpc.RetryPolicy? = None,
+) -> @moonrpc.CallReply {
+  match retry {
+    None => self.unary_once(path, request, metadata, timeout_millis)
+    Some(policy) => {
+      let mut attempt = 1
+      let mut reply = self.unary_once(path, request, metadata, timeout_millis)
+      while reply.messages.length() == 0 &&
+            policy.should_retry(reply.grpc_status, attempt) {
+        @async.sleep(policy.backoff_millis(attempt))
+        reply = self.unary_once(path, request, metadata, timeout_millis)
+        attempt = attempt + 1
+      }
+      reply
+    }
+  }
 }
 
 ///|

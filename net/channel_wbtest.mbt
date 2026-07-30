@@ -134,6 +134,72 @@ async fn drive_slow(
 }
 
 ///|
+async test "channel: a unary call retries a retryable failure and then succeeds" {
+  @async.with_task_group(g => {
+    // The handler fails the first attempt with UNAVAILABLE, then succeeds — so a
+    // correct retry loop re-issues once and returns the second reply.
+    let attempts = Ref(0)
+    let server = GrpcServer::new()
+    server.register_unary("/retry.R/Do", (ctx, _req) => {
+      attempts.val = attempts.val + 1
+      if attempts.val == 1 {
+        ctx.fail(@moonrpc.Status::code(Unavailable), "try again")
+        b""
+      } else {
+        b"ok"
+      }
+    })
+    let task = g.spawn(() => server.serve(port=18088))
+    @async.sleep(300)
+    let chan = Channel::connect("127.0.0.1", 18088)
+    let policy = @moonrpc.RetryPolicy::{
+      max_attempts: 3,
+      initial_backoff_millis: 10,
+      max_backoff_millis: 50,
+      backoff_multiplier: 2.0,
+      retryable: [@moonrpc.Status::code(Unavailable)],
+    }
+    let reply = chan.unary("/retry.R/Do", b"x", retry=Some(policy))
+    assert_eq(reply.grpc_status, 0)
+    assert_eq(reply.messages[0] == b"ok", true)
+    // one failure plus one successful retry.
+    assert_eq(attempts.val, 2)
+    chan.close()
+    task.cancel()
+  })
+}
+
+///|
+async test "channel: retries are exhausted and the last retryable status is returned" {
+  @async.with_task_group(g => {
+    // The handler always fails with UNAVAILABLE; the policy allows 2 attempts total,
+    // so the client makes exactly 2 and surfaces the failure.
+    let attempts = Ref(0)
+    let server = GrpcServer::new()
+    server.register_unary("/retry.R/Never", (ctx, _req) => {
+      attempts.val = attempts.val + 1
+      ctx.fail(@moonrpc.Status::code(Unavailable), "down")
+      b""
+    })
+    let task = g.spawn(() => server.serve(port=18089))
+    @async.sleep(300)
+    let chan = Channel::connect("127.0.0.1", 18089)
+    let policy = @moonrpc.RetryPolicy::{
+      max_attempts: 2,
+      initial_backoff_millis: 10,
+      max_backoff_millis: 50,
+      backoff_multiplier: 2.0,
+      retryable: [@moonrpc.Status::code(Unavailable)],
+    }
+    let reply = chan.unary("/retry.R/Never", b"x", retry=Some(policy))
+    assert_eq(reply.grpc_status, @moonrpc.Status::code(Unavailable))
+    assert_eq(attempts.val, 2)
+    chan.close()
+    task.cancel()
+  })
+}
+
+///|
 async test "channel: a call past its deadline is cancelled with DEADLINE_EXCEEDED" {
   @async.with_task_group(g => {
     let server = @socket.TcpServer::TcpServer(
