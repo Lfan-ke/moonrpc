@@ -74,6 +74,8 @@ pub fn RetryPolicy::backoff_millis(
   } else {
     backoff.to_int()
   }
+  // Never sleep a negative duration, even if a policy is misconfigured with a negative
+  // backoff.
   if capped < 0 {
     0
   } else {

@@ -154,6 +154,55 @@ test "client: a response header block split across HEADERS + CONTINUATION is rea
 }
 
 ///|
+test "client: a compressed reply under an unsupported encoding fails INTERNAL, not raw bytes" {
+  let client = H2Client::new()
+  let (id, _req) = client.unary("/echo.Echo/Say", b"x")
+  let _ = client.feed(Settings(params=[], ack=false))
+  let enc = HpackEncoder::new()
+  let hblock = enc.encode([
+    { name: b":status", value: b"200" },
+    { name: b"content-type", value: b"application/grpc" },
+    { name: b"grpc-encoding", value: b"deflate" },
+  ])
+  let _ = client.feed(
+    Headers(
+      stream_id=id,
+      fragment=hblock,
+      end_stream=false,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  // A message with the compression flag set under "deflate", which the client never
+  // advertised and does not decode.
+  let _ = client.feed(
+    Data(
+      stream_id=id,
+      data=encode_message(b"rawbytes", compressed=true),
+      end_stream=false,
+      padding=0,
+    ),
+  )
+  let tblock = enc.encode([{ name: b"grpc-status", value: b"0" }])
+  let _ = client.feed(
+    Headers(
+      stream_id=id,
+      fragment=tblock,
+      end_stream=true,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  let reply = client.reply(id)
+  // The RPC fails INTERNAL — the trailer's grpc-status 0 does not override it — and
+  // the undecodable bytes are not surfaced as a message.
+  assert_eq(reply.grpc_status, Status::code(Internal))
+  assert_eq(reply.messages.length(), 0)
+}
+
+///|
 test "client+server: a unary call round-trips over the two pure engines" {
   let server = H2Server::new()
   server.register("/echo.Echo/Say", req => cat(b"echo:", req))

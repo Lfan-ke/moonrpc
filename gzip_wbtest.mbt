@@ -109,3 +109,41 @@ test "gunzip rejects a payload byte flipped under the CRC-32" {
   }
   assert_eq(raised, true)
 }
+
+///|
+test "gunzip rejects an unsupported compression method" {
+  // byte 2 (CM) = 0x09 instead of DEFLATE's 0x08.
+  let bad = gz_unhex(
+    "1f8b0900cb9b6a6a02ffcb48cdc9c9d75148afca2c5028cf2fca490100eb83468211000000",
+  )
+  let mut raised = false
+  try gunzip(bad) |> ignore catch {
+    _ => raised = true
+  }
+  assert_eq(raised, true)
+}
+
+///|
+test "gunzip rejects a tampered ISIZE trailer" {
+  let good = gz_unhex(
+    "1f8b0800cb9b6a6a02ffcb48cdc9c9d75148afca2c5028cf2fca490100eb83468211000000",
+  )
+  // Flip the last ISIZE byte so the decoded length no longer matches.
+  let mut raised = false
+  try gunzip(gz_flip(good, good.length() - 1)) |> ignore catch {
+    _ => raised = true
+  }
+  assert_eq(raised, true)
+}
+
+///|
+test "gunzip rejects a truncated member" {
+  let good = gz_unhex(
+    "1f8b0800cb9b6a6a02ffcb48cdc9c9d75148afca2c5028cf2fca490100eb83468211000000",
+  )
+  let mut raised = false
+  try gunzip(good[0:20].to_owned()) |> ignore catch {
+    _ => raised = true
+  }
+  assert_eq(raised, true)
+}

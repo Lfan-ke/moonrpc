@@ -107,11 +107,21 @@ priv struct GzHuff {
 ///|
 /// Build a canonical Huffman table from `lengths` (one code length per symbol, 0 =
 /// symbol absent) over the first `n` symbols.
-fn GzHuff::build(lengths : Array[Int], n : Int) -> GzHuff {
+fn GzHuff::build(lengths : Array[Int], n : Int) -> GzHuff raise GzError {
   let max_bits = 15
   let counts = Array::make(max_bits + 1, 0)
   for i = 0; i < n; i = i + 1 {
     counts[lengths[i]] += 1
+  }
+  // Reject an over-subscribed code — more codes assigned at some length than the
+  // remaining code space allows (zlib puff.c's `left < 0`) — so a malformed dynamic
+  // table raises rather than building a table that misdecodes.
+  let mut left = 1
+  for len = 1; len <= max_bits; len = len + 1 {
+    left = (left << 1) - counts[len]
+    if left < 0 {
+      raise GzError("over-subscribed Huffman code")
+    }
   }
   let offsets = Array::make(max_bits + 2, 0)
   for len = 1; len <= max_bits; len = len + 1 {
@@ -188,7 +198,7 @@ fn gz_inflate_block(
 ///|
 /// The fixed literal/length tree (RFC 1951 §3.2.6): 0..143 → 8 bits, 144..255 → 9,
 /// 256..279 → 7, 280..287 → 8.
-fn gz_fixed_lit() -> GzHuff {
+fn gz_fixed_lit() -> GzHuff raise GzError {
   let lengths = Array::make(288, 0)
   for i = 0; i < 144; i = i + 1 {
     lengths[i] = 8
@@ -207,7 +217,7 @@ fn gz_fixed_lit() -> GzHuff {
 
 ///|
 /// The fixed distance tree: all 30 codes are 5 bits.
-fn gz_fixed_dist() -> GzHuff {
+fn gz_fixed_dist() -> GzHuff raise GzError {
   GzHuff::build(Array::make(30, 5), 30)
 }
 
@@ -297,7 +307,12 @@ fn gz_inflate_raw(data : Bytes, start : Int) -> Bytes raise GzError {
         raise GzError("truncated stored block header")
       }
       let len = data[br.pos].to_int() | (data[br.pos + 1].to_int() << 8)
-      br.pos = br.pos + 4 // LEN + NLEN
+      let nlen = data[br.pos + 2].to_int() | (data[br.pos + 3].to_int() << 8)
+      // LEN and its one's-complement NLEN must agree (RFC 1951 §3.2.4).
+      if (len ^ 0xFFFF) != nlen {
+        raise GzError("stored block LEN/NLEN mismatch")
+      }
+      br.pos = br.pos + 4
       if br.pos + len > data.length() {
         raise GzError("truncated stored block")
       }

@@ -42,6 +42,10 @@ pub(all) struct ClientCall {
   header_block : Buffer
   mut in_headers : Bool
   mut pending_end_stream : Bool
+  // A reply message could not be decompressed (or arrived under an unsupported
+  // encoding). The call fails INTERNAL and a later trailer `grpc-status` must not
+  // overwrite that back to OK.
+  mut decode_failed : Bool
   mut done : Bool
 }
 
@@ -79,6 +83,7 @@ fn ClientCall::new(
     header_block: Buffer(),
     in_headers: false,
     pending_end_stream: false,
+    decode_failed: false,
     done: false,
   }
 }
@@ -494,9 +499,13 @@ pub fn H2Client::is_done(self : H2Client, id : Int) -> Bool {
 pub fn H2Client::reply(self : H2Client, id : Int) -> CallReply {
   match self.calls.get(id) {
     Some(c) => {
-      let grpc = match c.grpc_status {
-        Some(v) => v
-        None => -1
+      let grpc = if c.decode_failed {
+        Status::code(Internal)
+      } else {
+        match c.grpc_status {
+          Some(v) => v
+          None => -1
+        }
       }
       {
         status: c.status,
@@ -536,11 +545,19 @@ fn drain_call_messages(c : ClientCall) -> Unit {
       break
     }
     let body = all[off + 5:off + 5 + len].to_owned()
-    // A reply message with the compression flag set is inflated when the response
-    // encoding is gzip; a decode failure (never expected from a well-behaved server)
-    // falls back to the raw body rather than dropping the message.
-    if compressed && c.resp_encoding == b"gzip" {
-      c.messages.push(gunzip(body) catch { _ => body })
+    // A reply message with the compression flag set is inflated under gzip. A decode
+    // failure, or a compression encoding the client never advertised, fails the RPC
+    // with INTERNAL rather than handing the caller the raw compressed bytes as if they
+    // were the message (gRPC's answer for an undecodable reply).
+    if compressed {
+      if c.resp_encoding == b"gzip" {
+        match (Some(gunzip(body)) catch { _ => None }) {
+          Some(m) => c.messages.push(m)
+          None => c.decode_failed = true
+        }
+      } else {
+        c.decode_failed = true
+      }
     } else {
       c.messages.push(body)
     }
