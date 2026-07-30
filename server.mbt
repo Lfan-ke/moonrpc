@@ -54,6 +54,10 @@ pub(all) struct SrvStream {
   // that failed to inflate). Answered with UNIMPLEMENTED, since we could not recover
   // the message the handler was meant to see.
   mut compressed_unsupported : Bool
+  // A request message declared a length past `max_message_size` (or a negative length
+  // from a high-bit-set prefix). Answered with RESOURCE_EXHAUSTED instead of trusting
+  // the length to slice the buffer.
+  mut oversize : Bool
   mut headers_sent : Bool
   mut trailers_sent : Bool
   mut bidi : BidiHandler?
@@ -86,6 +90,7 @@ fn SrvStream::new(id : Int, send_window : Int) -> SrvStream {
     status_message: "",
     req_encoding: b"",
     compressed_unsupported: false,
+    oversize: false,
     headers_sent: false,
     trailers_sent: false,
     bidi: None,
@@ -409,6 +414,12 @@ fn drain_messages(s : SrvStream) -> Unit {
       (all[off + 2].to_int() << 16) |
       (all[off + 3].to_int() << 8) |
       all[off + 4].to_int()
+    // A high-bit-set prefix decodes negative; either that or a length past the cap is
+    // rejected before it can drive an out-of-bounds slice or pin unbounded buffer.
+    if len < 0 || len > max_message_size {
+      s.oversize = true
+      break
+    }
     if n - off < 5 + len {
       break
     }
@@ -632,6 +643,15 @@ fn H2Server::advance(self : H2Server, s : SrvStream) -> Array[Frame] raise {
       s.trailers_only = true
       s.status_code = Status::code(Unimplemented)
       s.status_message = "grpc-encoding not supported; server accepts identity, gzip"
+      s.response_ended = true
+      return self.produce(s)
+    }
+    // A request message longer than the receive cap ends the call rather than trusting
+    // the declared length (gRPC's RESOURCE_EXHAUSTED for an over-size message).
+    if s.oversize && !s.response_ended {
+      s.trailers_only = true
+      s.status_code = Status::code(ResourceExhausted)
+      s.status_message = "received message larger than max"
       s.response_ended = true
       return self.produce(s)
     }

@@ -1,4 +1,11 @@
 ///|
+/// The default cap on a single received gRPC message (4 MiB, matching gRPC's default
+/// `MaxRecvMsgSize`). A length prefix above this — including one whose 4 bytes decode
+/// to a negative `Int` because the high bit is set — is rejected rather than trusted,
+/// so a hostile prefix can neither slice out of bounds nor pin unbounded buffer.
+pub let max_message_size : Int = 4 * 1024 * 1024
+
+///|
 /// Encode a payload as a gRPC *Length-Prefixed-Message*: a 1-byte compression
 /// flag, a 4-byte big-endian length, then the payload. This is the framing every
 /// gRPC transport shares (gRPC-Web over HTTP/1.1 and real gRPC over HTTP/2 alike).
@@ -26,7 +33,9 @@ pub fn decode_message(data : Bytes) -> (Bool, Bytes)? {
     (data[2].to_int() << 16) |
     (data[3].to_int() << 8) |
     data[4].to_int()
-  if data.length() < 5 + len {
+  // A high-bit-set prefix decodes to a negative `Int`; compare without recomputing
+  // `5 + len` (which would wrap) so a hostile length can't slice past the buffer.
+  if len < 0 || len > data.length() - 5 {
     return None
   }
   Some((flag != 0, data[5:5 + len].to_owned()))

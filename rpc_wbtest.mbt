@@ -43,6 +43,16 @@ test "framing: compressed flag and short-frame handling" {
 }
 
 ///|
+test "framing: a high-bit-set length prefix is rejected, not sliced out of bounds" {
+  // The 4-byte length 0x80000000 decodes to a negative Int; a naive `data[5:5+len]`
+  // slices with end < start and aborts. It must yield None instead.
+  let hostile = b"\x00\x80\x00\x00\x00\x01\x02"
+  assert_eq(decode_message(hostile) is None, true)
+  // A length past what the buffer holds is likewise None (a partial frame).
+  assert_eq(decode_message(b"\x00\x00\x00\x00\x7f\x01\x02") is None, true)
+}
+
+///|
 test "gRPC status codes" {
   assert_eq(Status::code(Ok), 0)
   assert_eq(Status::code(NotFound), 5)

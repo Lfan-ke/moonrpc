@@ -259,6 +259,46 @@ test "engine: a compressed request under an unsupported encoding gets UNIMPLEMEN
 }
 
 ///|
+test "engine: a message length prefix past the cap gets RESOURCE_EXHAUSTED, not a crash" {
+  let engine = H2Server::new()
+  engine.register("/echo.Echo/Say", req => req)
+  let enc = HpackEncoder::new()
+  let block = enc.encode([{ name: b":path", value: b"/echo.Echo/Say" }])
+  let _ = engine.feed(Settings(params=[], ack=false))
+  let _ = engine.feed(
+    Headers(
+      stream_id=1,
+      fragment=block,
+      end_stream=false,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  // A gRPC message prefix of 0x80000000: naively read as a signed Int this is negative,
+  // and `data[5:5+len]` would slice with end < start and abort the whole process.
+  let hostile = b"\x00\x80\x00\x00\x00\x01\x02"
+  let out = engine.feed(
+    Data(stream_id=1, data=hostile, end_stream=true, padding=0),
+  )
+  let dec = HpackDecoder::new()
+  let mut grpc_status = b""
+  for f in out {
+    match f {
+      Headers(fragment~, ..) =>
+        for h in dec.decode(fragment) {
+          if h.name == b"grpc-status" {
+            grpc_status = h.value
+          }
+        }
+      _ => ()
+    }
+  }
+  // 8 == RESOURCE_EXHAUSTED.
+  assert_eq(grpc_status == b"8", true)
+}
+
+///|
 test "engine: a gzip-compressed request is inflated and reaches the handler" {
   let engine = H2Server::new()
   // The handler echoes whatever bytes it receives; a correct decode means the reply

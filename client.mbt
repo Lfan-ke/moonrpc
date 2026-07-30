@@ -471,6 +471,14 @@ fn drain_call_messages(c : ClientCall) -> Unit {
       (all[off + 2].to_int() << 16) |
       (all[off + 3].to_int() << 8) |
       all[off + 4].to_int()
+    // A high-bit-set prefix decodes negative; reject that or a length past the cap
+    // (surfacing RESOURCE_EXHAUSTED) instead of slicing the buffer out of bounds.
+    if len < 0 || len > max_message_size {
+      if c.grpc_status is None {
+        c.grpc_status = Some(Status::code(ResourceExhausted))
+      }
+      break
+    }
     if n - off < 5 + len {
       break
     }
