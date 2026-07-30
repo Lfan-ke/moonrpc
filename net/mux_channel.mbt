@@ -68,13 +68,15 @@ pub async fn MuxChannel::read_pump(self : MuxChannel) -> Unit {
     if out.length() > 0 {
       self.write_locked(out)
     }
-    let done : Array[Int] = []
+    // Wake any call whose stream made progress: new reply messages arrived (for a streaming
+    // reader) or the stream completed (for a unary waiter).
+    let ready : Array[Int] = []
     for sid, _ in self.inboxes {
-      if self.engine.is_done(sid) {
-        done.push(sid)
+      if self.engine.has_messages(sid) || self.engine.is_done(sid) {
+        ready.push(sid)
       }
     }
-    for sid in done {
+    for sid in ready {
       if self.inboxes.get(sid) is Some(q) {
         q.put(())
       }
@@ -102,9 +104,75 @@ pub async fn MuxChannel::unary(
   let inbox : @aqueue.Queue[Unit] = @aqueue.Queue::Queue(kind=Unbounded)
   self.inboxes[id] = inbox
   self.write_locked(frames)
-  inbox.get()
+  // The pump now also wakes on intermediate messages, so wait until the stream truly ends.
+  while !self.engine.is_done(id) {
+    inbox.get()
+  }
   self.inboxes.remove(id)
   self.engine.reply(id)
+}
+
+///|
+/// A bidirectional stream on a multiplexed channel: send request messages with `send`,
+/// half-close with `close_send`, and read reply messages one at a time with `recv` — all
+/// interleaved, sharing the connection with other calls. This is truly interactive
+/// streaming (send while receiving), which the one-shot `Channel` can't do.
+pub struct BidiStream {
+  ch : MuxChannel
+  id : Int
+  inbox : @aqueue.Queue[Unit]
+  mut pending : Array[Bytes]
+  mut offset : Int
+}
+
+///|
+/// Open a bidirectional stream to `path`. Send request messages with `send`/`close_send`
+/// and read replies with `recv`.
+pub fn MuxChannel::open_bidi(
+  self : MuxChannel,
+  path : String,
+  metadata? : Array[@moonrpc.Header] = [],
+) -> BidiStream {
+  let id = self.engine.open(path, metadata~)
+  let inbox : @aqueue.Queue[Unit] = @aqueue.Queue::Queue(kind=Unbounded)
+  self.inboxes[id] = inbox
+  { ch: self, id, inbox, pending: [], offset: 0 }
+}
+
+///|
+/// Send one request message on the stream.
+pub async fn BidiStream::send(self : BidiStream, message : Bytes) -> Unit {
+  self.ch.write_locked(self.ch.engine.send(self.id, message))
+}
+
+///|
+/// Half-close the request side: no more messages will be sent.
+pub async fn BidiStream::close_send(self : BidiStream) -> Unit {
+  self.ch.write_locked(self.ch.engine.close_send(self.id))
+}
+
+///|
+/// Read the next reply message, blocking until one arrives. `None` once the server has
+/// finished the stream and every message has been read.
+pub async fn BidiStream::recv(self : BidiStream) -> Bytes? {
+  for ;; {
+    if self.offset < self.pending.length() {
+      let m = self.pending[self.offset]
+      self.offset += 1
+      return Some(m)
+    }
+    let more = self.ch.engine.take_messages(self.id)
+    if more.length() > 0 {
+      self.pending = more
+      self.offset = 0
+      continue
+    }
+    if self.ch.engine.is_done(self.id) {
+      self.ch.inboxes.remove(self.id)
+      return None
+    }
+    self.inbox.get()
+  }
 }
 
 ///|

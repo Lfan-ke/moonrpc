@@ -26,7 +26,7 @@ pub(all) struct ClientCall {
   mut send_window : Int
   data : Buffer
   mut data_off : Int
-  messages : Array[Bytes]
+  mut messages : Array[Bytes]
   mut recv_window : Int
   mut status : Bytes
   mut grpc_status : Int?
@@ -517,6 +517,30 @@ pub fn H2Client::reply(self : H2Client, id : Int) -> CallReply {
     }
     None =>
       { status: b"", grpc_status: -1, headers: [], messages: [], trailers: [] }
+  }
+}
+
+///|
+/// Whether a call has reply messages buffered but not yet taken — for reading a streaming
+/// response incrementally as it arrives, rather than all at once via `reply`.
+pub fn H2Client::has_messages(self : H2Client, id : Int) -> Bool {
+  match self.calls.get(id) {
+    Some(c) => c.messages.length() > 0
+    None => false
+  }
+}
+
+///|
+/// Take every reply message received so far, clearing the call's buffer — the incremental
+/// counterpart to `reply`, for a server- or bidi-streaming response read message by message.
+pub fn H2Client::take_messages(self : H2Client, id : Int) -> Array[Bytes] {
+  match self.calls.get(id) {
+    Some(c) => {
+      let msgs = c.messages
+      c.messages = []
+      msgs
+    }
+    None => []
   }
 }
 
