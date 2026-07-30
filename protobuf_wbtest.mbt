@@ -247,3 +247,26 @@ test "WireType code/from_code and group rejection" {
   assert_eq(WireType::from_code(4) == None, true) // end-group
   assert_eq(WireType::from_code(6) == None, true)
 }
+
+///|
+test "protobuf: map<string,string> entries and packed repeated int32 round-trip" {
+  let w = PbWriter::new()
+  w.map_string_string(1, "a", "1")
+  w.map_string_string(1, "b", "2")
+  w.packed_int32(2, [1, -1, 300, 0])
+  let r = PbReader::new(w.to_bytes())
+  let entries : Array[(String, String)] = []
+  let mut packed : Array[Int] = []
+  while !r.eof() {
+    let (field, wire) = r.read_tag()
+    match field {
+      1 => entries.push(r.read_map_string_string())
+      2 => packed = r.read_packed_int32()
+      _ => r.skip(wire)
+    }
+  }
+  assert_eq(entries.length(), 2)
+  assert_eq(entries[0].0 == "a" && entries[0].1 == "1", true)
+  assert_eq(entries[1].0 == "b" && entries[1].1 == "2", true)
+  assert_eq(packed == [1, -1, 300, 0], true)
+}

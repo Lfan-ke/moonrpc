@@ -416,3 +416,65 @@ pub fn PbReader::skip(self : PbReader, wire : WireType) -> Unit raise PbError {
     }
   }
 }
+
+///|
+/// Write one `map<string, string>` entry for `field`: a length-delimited submessage
+/// `{ key = 1, value = 2 }`, emitted once per pair (a proto map is repeated entries).
+pub fn PbWriter::map_string_string(
+  self : PbWriter,
+  field : Int,
+  key : String,
+  value : String,
+) -> Unit {
+  let entry = PbWriter::new()
+  entry.string_(1, key)
+  entry.string_(2, value)
+  self.message_(field, entry.to_bytes())
+}
+
+///|
+/// Write a packed `repeated int32` field: all values as back-to-back varints inside
+/// one length-delimited field (proto3's default for scalar repeated).
+pub fn PbWriter::packed_int32(
+  self : PbWriter,
+  field : Int,
+  values : Array[Int],
+) -> Unit {
+  let body = PbWriter::new()
+  for v in values {
+    body.write_varint(v.to_int64().reinterpret_as_uint64())
+  }
+  self.message_(field, body.to_bytes())
+}
+
+///|
+/// Read one `map<string, string>` entry (a length-delimited `{ key = 1, value = 2 }`
+/// submessage) as `(key, value)`. Call once the tag for the map field has been read.
+pub fn PbReader::read_map_string_string(
+  self : PbReader,
+) -> (String, String) raise PbError {
+  let r = PbReader::new(self.read_len_delim())
+  let mut k = ""
+  let mut v = ""
+  while !r.eof() {
+    let (field, wire) = r.read_tag()
+    match field {
+      1 => k = r.read_string()
+      2 => v = r.read_string()
+      _ => r.skip(wire)
+    }
+  }
+  (k, v)
+}
+
+///|
+/// Read a packed `repeated int32` field: the length-delimited body decoded as
+/// back-to-back int32 varints.
+pub fn PbReader::read_packed_int32(self : PbReader) -> Array[Int] raise PbError {
+  let r = PbReader::new(self.read_len_delim())
+  let out : Array[Int] = []
+  while !r.eof() {
+    out.push(r.read_int32())
+  }
+  out
+}
