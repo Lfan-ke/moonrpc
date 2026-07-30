@@ -105,6 +105,55 @@ test "client: a gzip-encoded response message is inflated for the caller" {
 }
 
 ///|
+test "client: a response header block split across HEADERS + CONTINUATION is reassembled" {
+  let client = H2Client::new()
+  let (id, _req) = client.unary("/echo.Echo/Say", b"x")
+  let _ = client.feed(Settings(params=[], ack=false))
+  let enc = HpackEncoder::new()
+  let block = enc.encode([
+    { name: b":status", value: b"200" },
+    { name: b"content-type", value: b"application/grpc" },
+    { name: b"x-custom", value: b"hello" },
+  ])
+  // Deliver the block in two frames: HEADERS(end_headers=false) then CONTINUATION.
+  // The custom header is only recoverable if the fragments are concatenated before
+  // the stateful HPACK decode — decoding each fragment alone desyncs or panics.
+  let mid = block.length() / 2
+  let _ = client.feed(
+    Headers(
+      stream_id=id,
+      fragment=block[0:mid].to_owned(),
+      end_stream=false,
+      end_headers=false,
+      priority=None,
+      padding=0,
+    ),
+  )
+  let _ = client.feed(
+    Continuation(
+      stream_id=id,
+      fragment=block[mid:block.length()].to_owned(),
+      end_headers=true,
+    ),
+  )
+  let tblock = enc.encode([{ name: b"grpc-status", value: b"0" }])
+  let _ = client.feed(
+    Headers(
+      stream_id=id,
+      fragment=tblock,
+      end_stream=true,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  let reply = client.reply(id)
+  assert_eq(reply.status == b"200", true)
+  assert_eq(reply.grpc_status, 0)
+  assert_eq(header_present(reply.headers, b"x-custom", b"hello"), true)
+}
+
+///|
 test "client+server: a unary call round-trips over the two pure engines" {
   let server = H2Server::new()
   server.register("/echo.Echo/Say", req => cat(b"echo:", req))

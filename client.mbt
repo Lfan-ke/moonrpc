@@ -36,6 +36,12 @@ pub(all) struct ClientCall {
   resp_headers : Array[Header]
   resp_trailers : Array[Header]
   mut headers_seen : Bool
+  // A response header block (initial metadata or trailers) split across HEADERS +
+  // CONTINUATION is accumulated here and decoded only once END_HEADERS arrives, since
+  // the HPACK decoder is stateful and must see each complete block exactly once.
+  header_block : Buffer
+  mut in_headers : Bool
+  mut pending_end_stream : Bool
   mut done : Bool
 }
 
@@ -70,6 +76,9 @@ fn ClientCall::new(
     resp_headers: [],
     resp_trailers: [],
     headers_seen: false,
+    header_block: Buffer(),
+    in_headers: false,
+    pending_end_stream: false,
     done: false,
   }
 }
@@ -308,39 +317,32 @@ pub fn H2Client::feed(self : H2Client, frame : Frame) -> Array[Frame] raise {
       }
       self.pump_requests()
     }
-    Headers(stream_id~, fragment~, end_stream~, ..) => {
+    Headers(stream_id~, fragment~, end_stream~, end_headers~, ..) => {
       match self.calls.get(stream_id) {
         Some(c) => {
-          let headers = self.decoder.decode(fragment)
-          for h in headers {
-            if h.name == b":status" {
-              c.status = h.value
-            } else if h.name == b"grpc-status" {
-              c.grpc_status = Some(ascii_bytes_to_int(h.value))
-            } else if h.name == b"grpc-message" {
-              ()
-            } else if h.name == b"grpc-encoding" {
-              c.resp_encoding = h.value
-            } else if !c.headers_seen {
-              if !is_reserved_header(h.name) {
-                // A `-bin` metadata value arrives base64-encoded; surface raw bytes.
-                c.resp_headers.push({
-                  name: h.name,
-                  value: metadata_value_from_wire(h.name, h.value),
-                })
-              }
-            } else {
-              c.resp_trailers.push({
-                name: h.name,
-                value: metadata_value_from_wire(h.name, h.value),
-              })
-            }
-          }
-          c.headers_seen = true
-          if end_stream {
-            c.done = true
+          // Start a new header block; END_STREAM rides the HEADERS frame, so remember
+          // it to apply once the block (which may continue across CONTINUATION) ends.
+          c.header_block.write_bytes(fragment)
+          c.pending_end_stream = end_stream
+          if end_headers {
+            self.deliver_headers(c)
+          } else {
+            c.in_headers = true
           }
         }
+        None => ()
+      }
+      []
+    }
+    Continuation(stream_id~, fragment~, end_headers~) => {
+      match self.calls.get(stream_id) {
+        Some(c) =>
+          if c.in_headers {
+            c.header_block.write_bytes(fragment)
+            if end_headers {
+              self.deliver_headers(c)
+            }
+          }
         None => ()
       }
       []
@@ -367,11 +369,46 @@ pub fn H2Client::feed(self : H2Client, frame : Frame) -> Array[Frame] raise {
       }
       []
     }
-    GoAway(..)
-    | Priority(..)
-    | PushPromise(..)
-    | Continuation(..)
-    | Unknown(..) => []
+    GoAway(..) | Priority(..) | PushPromise(..) | Unknown(..) => []
+  }
+}
+
+///|
+/// Decode this call's now-complete response header block (HPACK is stateful, so a
+/// block spanning HEADERS + CONTINUATION is decoded exactly once, here). The first
+/// completed block is initial metadata; a later one is trailers. Applies the
+/// END_STREAM the initiating HEADERS carried.
+fn H2Client::deliver_headers(self : H2Client, c : ClientCall) -> Unit raise {
+  let headers = self.decoder.decode(c.header_block.to_bytes())
+  for h in headers {
+    if h.name == b":status" {
+      c.status = h.value
+    } else if h.name == b"grpc-status" {
+      c.grpc_status = Some(ascii_bytes_to_int(h.value))
+    } else if h.name == b"grpc-message" {
+      ()
+    } else if h.name == b"grpc-encoding" {
+      c.resp_encoding = h.value
+    } else if !c.headers_seen {
+      // A `-bin` metadata value arrives base64-encoded; surface raw bytes.
+      if !is_reserved_header(h.name) {
+        c.resp_headers.push({
+          name: h.name,
+          value: metadata_value_from_wire(h.name, h.value),
+        })
+      }
+    } else {
+      c.resp_trailers.push({
+        name: h.name,
+        value: metadata_value_from_wire(h.name, h.value),
+      })
+    }
+  }
+  c.headers_seen = true
+  c.header_block.reset()
+  c.in_headers = false
+  if c.pending_end_stream {
+    c.done = true
   }
 }
 
