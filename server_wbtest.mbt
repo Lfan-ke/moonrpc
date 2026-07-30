@@ -214,3 +214,45 @@ test "percent_encode follows the grpc-message spec" {
   // Control characters are escaped (newline 0x0A).
   assert_eq(percent_encode("a\nb") == b"a%0Ab", true)
 }
+
+///|
+test "engine: a compressed request under an unsupported encoding gets UNIMPLEMENTED" {
+  let engine = H2Server::new()
+  engine.register("/echo.Echo/Say", req => req)
+  let enc = HpackEncoder::new()
+  let block = enc.encode([
+    { name: b":path", value: b"/echo.Echo/Say" },
+    { name: b"grpc-encoding", value: b"gzip" },
+  ])
+  let _ = engine.feed(Settings(params=[], ack=false))
+  let _ = engine.feed(
+    Headers(
+      stream_id=1,
+      fragment=block,
+      end_stream=false,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  // A gRPC message whose compression flag (byte 0) is set: the server must not read
+  // the body as-is, and answers UNIMPLEMENTED since it only supports identity.
+  let compressed = b"\x01\x00\x00\x00\x03abc"
+  let out = engine.feed(
+    Data(stream_id=1, data=compressed, end_stream=true, padding=0),
+  )
+  let dec = HpackDecoder::new()
+  let mut grpc_status = b""
+  for f in out {
+    match f {
+      Headers(fragment~, ..) =>
+        for h in dec.decode(fragment) {
+          if h.name == b"grpc-status" {
+            grpc_status = h.value
+          }
+        }
+      _ => ()
+    }
+  }
+  assert_eq(grpc_status == b"12", true)
+}

@@ -46,6 +46,10 @@ pub(all) struct SrvStream {
   mut trailers_only : Bool
   mut status_code : Int
   mut status_message : String
+  // A request message arrived with the compressed flag set. We advertise (and only
+  // support) identity, so this is answered with UNIMPLEMENTED rather than misreading
+  // the compressed bytes as the message.
+  mut compressed_unsupported : Bool
   mut headers_sent : Bool
   mut trailers_sent : Bool
   mut bidi : BidiHandler?
@@ -76,6 +80,7 @@ fn SrvStream::new(id : Int, send_window : Int) -> SrvStream {
     trailers_only: false,
     status_code: 0,
     status_message: "",
+    compressed_unsupported: false,
     headers_sent: false,
     trailers_sent: false,
     bidi: None,
@@ -311,6 +316,7 @@ fn drain_messages(s : SrvStream) -> Unit {
   let n = all.length()
   let mut off = s.req_off
   while n - off >= 5 {
+    let compressed = all[off].to_int() != 0
     let len = (all[off + 1].to_int() << 24) |
       (all[off + 2].to_int() << 16) |
       (all[off + 3].to_int() << 8) |
@@ -318,7 +324,14 @@ fn drain_messages(s : SrvStream) -> Unit {
     if n - off < 5 + len {
       break
     }
-    s.req_msgs.push(all[off + 5:off + 5 + len].to_owned())
+    // The message-encoding flag (byte 0): a set flag means the body is compressed
+    // with the call's grpc-encoding, which we do not decode — flag it rather than
+    // hand the compressed bytes to the handler as if they were the message.
+    if compressed {
+      s.compressed_unsupported = true
+    } else {
+      s.req_msgs.push(all[off + 5:off + 5 + len].to_owned())
+    }
     off = off + 5 + len
   }
   s.req_off = off
@@ -505,6 +518,16 @@ fn H2Server::advance(self : H2Server, s : SrvStream) -> Array[Frame] raise {
   }
   if !s.trailers_only {
     drain_messages(s)
+    // A compressed request under an encoding we do not decode ends the call with
+    // UNIMPLEMENTED (gRPC's answer for an unsupported message-encoding), rather than
+    // running the handler over misread bytes.
+    if s.compressed_unsupported && !s.response_ended {
+      s.trailers_only = true
+      s.status_code = Status::code(Unimplemented)
+      s.status_message = "grpc-encoding not supported; server accepts identity"
+      s.response_ended = true
+      return self.produce(s)
+    }
     match self.handlers.get(s.path) {
       Some(Bidi(_)) =>
         match s.bidi {
@@ -603,6 +626,7 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
       let block = self.encoder.encode([
         { name: b":status", value: b"200" },
         { name: b"content-type", value: b"application/grpc" },
+        { name: b"grpc-accept-encoding", value: b"identity" },
         { name: b"grpc-status", value: int_to_ascii_bytes(s.status_code) },
         { name: b"grpc-message", value: percent_encode(s.status_message) },
       ])
@@ -626,6 +650,7 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
       { name: b":status", value: b"200" },
       { name: b"content-type", value: b"application/grpc" },
       { name: b"grpc-encoding", value: b"identity" },
+      { name: b"grpc-accept-encoding", value: b"identity" },
     ]
     for h in s.ctx.resp_headers {
       headers.push(h)
