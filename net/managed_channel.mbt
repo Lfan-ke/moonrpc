@@ -53,6 +53,22 @@ pub async fn ManagedChannel::connect(
 }
 
 ///|
+/// Resolve `name`'s A records via the DNS server at `dns_server:dns_port`, then dial each
+/// resolved address at `target_port` and load-balance across them — gRPC's `dns:///`
+/// target end to end (name resolution feeding the connection pool).
+pub async fn ManagedChannel::dns_connect(
+  dns_server : String,
+  dns_port : Int,
+  name : String,
+  target_port : Int,
+  policy? : @moonrpc.LbPolicy = PickFirst,
+  id? : Int = 0x2a2a,
+) -> ManagedChannel {
+  let addrs = resolve_a(dns_server, dns_port, name, id~)
+  ManagedChannel::connect(addrs.map(a => (a, target_port)), policy~)
+}
+
+///|
 /// The live `Channel` for the next call, chosen by the pool's picker over the READY
 /// sub-connections. `None` when nothing is reachable.
 fn ManagedChannel::pick(self : ManagedChannel) -> Channel? {

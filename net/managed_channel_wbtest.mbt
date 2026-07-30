@@ -60,6 +60,37 @@ async test "managed channel: pick_first pins every call to the first backend" {
 }
 
 ///|
+// A DNS A response resolving example.com -> 127.0.0.1 (0x7f000001), id 0x2a2a.
+let mock_localhost_response : Bytes = b"\x2a\x2a\x81\x80\x00\x01\x00\x01\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01\xc0\x0c\x00\x01\x00\x01\x00\x00\x01\x2c\x00\x04\x7f\x00\x00\x01"
+
+///|
+async test "managed channel: dns_connect resolves a name over UDP then calls the resolved backend" {
+  @async.with_task_group(g => {
+    let backend = GrpcServer::new()
+    backend.register("/echo.E/Say", req => cat(b"A:", req))
+    let tb = g.spawn(() => backend.serve(port=18106))
+    let dns = @socket.UdpServer(@socket.Addr::parse("127.0.0.1:15355"))
+    let td = g.spawn(() => {
+      let buf = FixedArray::make(512, b'\x00')
+      let (_, addr) = dns.recvfrom(buf)
+      dns.sendto(mock_localhost_response, addr)
+    })
+    @async.sleep(300)
+    // Resolve example.com -> 127.0.0.1 and dial it at the backend's port.
+    let chan = ManagedChannel::dns_connect(
+      "127.0.0.1", 15355, "example.com", 18106,
+    )
+    assert_eq(chan.ready_addresses(), ["127.0.0.1:18106"])
+    let r = chan.unary("/echo.E/Say", b"x")
+    assert_eq(r.messages[0] == b"A:x", true)
+    chan.close()
+    dns.close()
+    tb.cancel()
+    td.cancel()
+  })
+}
+
+///|
 async test "managed channel: a backend that fails to dial is skipped; calls route to the live one" {
   @async.with_task_group(g => {
     let a = GrpcServer::new()
