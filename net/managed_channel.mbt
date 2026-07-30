@@ -99,6 +99,49 @@ pub async fn ManagedChannel::unary(
 }
 
 ///|
+/// Make a unary call under a hedging policy: fire attempts in parallel — a fresh one
+/// every `delay_millis`, each on a picked backend — and return the first whose status
+/// commits (OK or a fatal error), cancelling the rest. If every attempt finishes without
+/// committing (all non-fatal), the last reply is returned.
+pub async fn ManagedChannel::unary_hedged(
+  self : ManagedChannel,
+  path : String,
+  request : Bytes,
+  hedging : @moonrpc.HedgingPolicy,
+  metadata? : Array[@moonrpc.Header] = [],
+  timeout_millis? : Int? = None,
+) -> @moonrpc.CallReply {
+  @async.with_task_group(g => {
+    let tasks : Array[@async.Task[@moonrpc.CallReply]] = []
+    let mut started = 0
+    while hedging.can_start_another(started) {
+      started = started + 1
+      let t = g.spawn(() => {
+        match self.pick() {
+          None => unavailable_reply()
+          Some(ch) => {
+            let reply = ch.unary(path, request, metadata~, timeout_millis~)
+            if hedging.should_commit(reply.grpc_status) {
+              g.return_immediately(reply)
+            }
+            reply
+          }
+        }
+      })
+      tasks.push(t)
+      if hedging.can_start_another(started) && hedging.delay_millis() > 0 {
+        @async.sleep(hedging.delay_millis())
+      }
+    }
+    let mut result = unavailable_reply()
+    for t in tasks {
+      result = t.wait()
+    }
+    result
+  })
+}
+
+///|
 /// Make a server-streaming call on a picked backend.
 pub async fn ManagedChannel::server_streaming(
   self : ManagedChannel,

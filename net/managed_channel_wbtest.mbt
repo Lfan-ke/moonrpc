@@ -35,6 +35,34 @@ async test "managed channel: round-robin spreads calls across two live backends"
 }
 
 ///|
+async test "managed channel: hedging commits on the first OK and cancels the pending attempts" {
+  @async.with_task_group(g => {
+    let count = [0]
+    let backend = GrpcServer::new()
+    backend.register("/echo.E/Say", req => {
+      count[0] = count[0] + 1
+      cat(b"A:", req)
+    })
+    let tb = g.spawn(() => backend.serve(port=18107))
+    @async.sleep(300)
+    let chan = ManagedChannel::connect([("127.0.0.1", 18107)])
+    // Three permitted attempts, but a long hedging delay: the first attempt's OK commits
+    // before any hedge is due, so only one request reaches the backend.
+    let policy = {
+      ..@moonrpc.HedgingPolicy::default(),
+      max_attempts: 3,
+      hedging_delay_millis: 1000,
+    }
+    let r = chan.unary_hedged("/echo.E/Say", b"x", policy)
+    assert_eq(r.grpc_status, 0)
+    assert_eq(r.messages[0] == b"A:x", true)
+    assert_eq(count[0], 1)
+    chan.close()
+    tb.cancel()
+  })
+}
+
+///|
 async test "managed channel: pick_first pins every call to the first backend" {
   @async.with_task_group(g => {
     let a = GrpcServer::new()
