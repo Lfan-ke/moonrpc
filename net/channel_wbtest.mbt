@@ -84,6 +84,29 @@ async test "channel: a client-streaming call sends many messages for one reply o
 }
 
 ///|
+async test "channel: a bidi-streaming call exchanges a run of messages over a socket" {
+  @async.with_task_group(g => {
+    let server = GrpcServer::new()
+    server.register_bidi("/chat.C/Talk", _ctx => {
+      on_message: m => [cat(b"re:", m)],
+      on_end: () => [b"bye"],
+    })
+    let task = g.spawn(() => server.serve(port=18085))
+    @async.sleep(300)
+    let chan = Channel::connect("127.0.0.1", 18085)
+    let reply = chan.bidi("/chat.C/Talk", [b"hi", b"there"])
+    assert_eq(reply.grpc_status, 0)
+    // one reply per request (on_message) plus the on_end reply, in order.
+    assert_eq(reply.messages.length(), 3)
+    assert_eq(reply.messages[0] == b"re:hi", true)
+    assert_eq(reply.messages[1] == b"re:there", true)
+    assert_eq(reply.messages[2] == b"bye", true)
+    chan.close()
+    task.cancel()
+  })
+}
+
+///|
 /// Drive one h2c connection but sleep `delay` milliseconds before writing any
 /// non-empty batch of response frames — a server slow enough to blow a short client
 /// deadline.

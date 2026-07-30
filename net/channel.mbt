@@ -137,6 +137,29 @@ pub async fn Channel::client_streaming(
 }
 
 ///|
+/// Make a bidirectional-streaming call: send every message in `requests`, half-close,
+/// then read the ordered run of reply messages the server produced (in
+/// `CallReply::messages`). This is the eager form the engine's synchronous core
+/// models — every request is sent before the replies are collected, which pairs with
+/// the eager server `BidiHandler`. A truly interactive exchange (sending while
+/// receiving) or several concurrent calls multiplexed on one channel need the shared
+/// read-demux loop on the roadmap; until then a `Channel` drives one call at a time.
+pub async fn Channel::bidi(
+  self : Channel,
+  path : String,
+  requests : Array[Bytes],
+  metadata? : Array[@moonrpc.Header] = [],
+  timeout_millis? : Int? = None,
+) -> @moonrpc.CallReply {
+  let id = self.engine.open(path, metadata~, timeout_millis~)
+  for m in requests {
+    write_frames(self.conn, self.engine.send(id, m))
+  }
+  write_frames(self.conn, self.engine.close_send(id))
+  self.drive(id, timeout_millis)
+}
+
+///|
 /// Register the `grpc.health.v1.Health` service (Check + Watch) on this server.
 pub fn GrpcServer::register_health(
   self : GrpcServer,
