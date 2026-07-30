@@ -171,6 +171,36 @@ pub async fn Channel::server_streaming(
 }
 
 ///|
+/// Open a streaming call and collect at least `count` reply messages read inline off the
+/// socket — no background reader — returning as soon as that many have arrived or the server
+/// ends the stream. This bounds an otherwise unbounded stream (a subscription such as etcd's
+/// Watch, or a long server-streaming feed) to the messages the caller wants, then the caller
+/// closes the channel; reading inline keeps the whole exchange in one task with a clean
+/// close, avoiding a demux pump that a blocked socket read can't be cancelled out of. Pass
+/// `half_close=false` for a bidi subscription that keeps its request side open.
+pub async fn Channel::stream_take(
+  self : Channel,
+  path : String,
+  request : Bytes,
+  count : Int,
+  metadata? : Array[@moonrpc.Header] = [],
+  timeout_millis? : Int? = None,
+  half_close? : Bool = true,
+) -> Array[Bytes] {
+  let id = self.engine.open(path, metadata~, timeout_millis~)
+  write_frames(self.conn, self.engine.send(id, request, end=half_close))
+  let collected : Array[Bytes] = []
+  while collected.length() < count && !self.engine.is_done(id) {
+    let frame = read_frame(self.conn)
+    write_frames(self.conn, self.engine.feed(frame))
+    for m in self.engine.take_messages(id) {
+      collected.push(m)
+    }
+  }
+  collected
+}
+
+///|
 /// Make a client-streaming call: send every message in `requests`, half-close, then
 /// read the single reply.
 pub async fn Channel::client_streaming(

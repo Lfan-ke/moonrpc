@@ -343,3 +343,22 @@ async test "channel: a failing call carries a google.rpc.Status in grpc-status-d
     task.cancel()
   })
 }
+
+///|
+async test "channel stream_take: collects streamed replies inline without a pump" {
+  @async.with_task_group(g => {
+    let server = GrpcServer::new()
+    server.register_server_streaming("/count.C/Up", (_ctx, req) => {
+      [cat(req, b"-1"), cat(req, b"-2"), cat(req, b"-3")]
+    })
+    let task = g.spawn(() => server.serve(port=18132))
+    @async.sleep(300)
+    let chan = Channel::connect("127.0.0.1", 18132)
+    let got = chan.stream_take("/count.C/Up", b"n", 2)
+    assert_eq(got.length() >= 2, true)
+    assert_eq(got[0] == b"n-1", true)
+    assert_eq(got[1] == b"n-2", true)
+    chan.close()
+    task.cancel()
+  })
+}
