@@ -200,6 +200,41 @@ async test "channel: retries are exhausted and the last retryable status is retu
 }
 
 ///|
+async test "channel: retries stop at the absolute deadline, not once per attempt" {
+  @async.with_task_group(g => {
+    // The server fails fast with UNAVAILABLE every time; the 200 ms backoff between
+    // retries would run well past the 120 ms deadline if the deadline reset per
+    // attempt, so the whole call must instead end at the deadline.
+    let server = GrpcServer::new()
+    server.register_unary("/r.R/Down", (ctx, _req) => {
+      ctx.fail(@moonrpc.Status::code(Unavailable), "down")
+      b""
+    })
+    let task = g.spawn(() => server.serve(port=18090))
+    @async.sleep(300)
+    let chan = Channel::connect("127.0.0.1", 18090)
+    let policy = @moonrpc.RetryPolicy::{
+      max_attempts: 5,
+      initial_backoff_millis: 200,
+      max_backoff_millis: 200,
+      backoff_multiplier: 1.0,
+      retryable: [@moonrpc.Status::code(Unavailable)],
+    }
+    let reply = chan.unary(
+      "/r.R/Down",
+      b"x",
+      timeout_millis=Some(120),
+      retry=Some(policy),
+    )
+    // The deadline fires during the first backoff; the call ends DEADLINE_EXCEEDED
+    // rather than grinding through all five attempts.
+    assert_eq(reply.grpc_status, @moonrpc.Status::code(DeadlineExceeded))
+    chan.close()
+    task.cancel()
+  })
+}
+
+///|
 async test "channel: a call past its deadline is cancelled with DEADLINE_EXCEEDED" {
   @async.with_task_group(g => {
     let server = @socket.TcpServer::TcpServer(

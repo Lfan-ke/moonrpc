@@ -106,8 +106,11 @@ async fn Channel::unary_once(
 /// Make a unary call: one request message, one reply. `timeout_millis`, when set, is
 /// sent as `grpc-timeout` and enforced locally. With a `retry` policy the call is
 /// re-issued on a new stream after a backoff sleep while its status is retryable and
-/// attempts remain — but only when it is still uncommitted (no reply message has
-/// arrived), as gRPC requires.
+/// attempts remain, with the whole retry sequence bounded by the one deadline. A call
+/// is retried only while uncommitted — here, while no reply message has arrived;
+/// committing on received initial metadata as well (gRPC A6) is a refinement, and
+/// matters only for the rare retryable failure that follows a non-trailers-only
+/// response.
 pub async fn Channel::unary(
   self : Channel,
   path : String,
@@ -119,15 +122,35 @@ pub async fn Channel::unary(
   match retry {
     None => self.unary_once(path, request, metadata, timeout_millis)
     Some(policy) => {
-      let mut attempt = 1
-      let mut reply = self.unary_once(path, request, metadata, timeout_millis)
-      while reply.messages.length() == 0 &&
-            policy.should_retry(reply.grpc_status, attempt) {
-        @async.sleep(policy.backoff_millis(attempt))
-        reply = self.unary_once(path, request, metadata, timeout_millis)
-        attempt = attempt + 1
+      // Run every attempt plus its backoff under one budget: the gRPC deadline is
+      // absolute for the whole call, so the retries share the original timeout rather
+      // than each getting a fresh one (which would let the wall-clock reach N*timeout).
+      let run = () => {
+        let mut attempt = 1
+        let mut reply = self.unary_once(path, request, metadata, timeout_millis)
+        while reply.messages.length() == 0 &&
+              policy.should_retry(reply.grpc_status, attempt) {
+          @async.sleep(policy.backoff_millis(attempt))
+          reply = self.unary_once(path, request, metadata, timeout_millis)
+          attempt = attempt + 1
+        }
+        reply
       }
-      reply
+      match timeout_millis {
+        None => run()
+        Some(ms) =>
+          match (@async.with_timeout_opt(ms, run) : @moonrpc.CallReply?) {
+            Some(r) => r
+            None =>
+              {
+                status: b"",
+                grpc_status: @moonrpc.Status::code(DeadlineExceeded),
+                headers: [],
+                messages: [],
+                trailers: [],
+              }
+          }
+      }
     }
   }
 }

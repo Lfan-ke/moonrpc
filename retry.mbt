@@ -40,7 +40,9 @@ pub fn RetryPolicy::should_retry(
   status_code : Int,
   attempts_made : Int,
 ) -> Bool {
-  if attempts_made >= self.max_attempts || status_code == 0 {
+  // gRPC caps the effective attempt count at 5 regardless of the configured value.
+  let cap = if self.max_attempts > 5 { 5 } else { self.max_attempts }
+  if attempts_made >= cap || status_code == 0 {
     return false
   }
   for code in self.retryable {

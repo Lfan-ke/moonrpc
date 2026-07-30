@@ -27,6 +27,20 @@ test "retry: custom retryable set" {
 }
 
 ///|
+test "retry: the effective attempt count is capped at 5" {
+  let p = RetryPolicy::{
+    max_attempts: 100,
+    initial_backoff_millis: 10,
+    max_backoff_millis: 100,
+    backoff_multiplier: 2.0,
+    retryable: [Status::code(Unavailable)],
+  }
+  // Even with max_attempts 100, the 5th attempt is the last.
+  assert_eq(p.should_retry(Status::code(Unavailable), 4), true)
+  assert_eq(p.should_retry(Status::code(Unavailable), 5), false)
+}
+
+///|
 test "retry: backoff grows geometrically and saturates at the cap" {
   let p = RetryPolicy::default()
   assert_eq(p.backoff_millis(1), 100)
