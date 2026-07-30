@@ -476,7 +476,11 @@ fn H2Server::complete_headers(self : H2Server, s : SrvStream) -> Unit raise {
   let metadata : Array[Header] = []
   for h in headers {
     if !is_reserved_header(h.name) {
-      metadata.push(h)
+      // A `-bin` metadata value arrives base64-encoded; surface the raw bytes.
+      metadata.push({
+        name: h.name,
+        value: metadata_value_from_wire(h.name, h.value),
+      })
     }
   }
   let deadline = match header_value(headers, b"grpc-timeout") {
@@ -653,7 +657,10 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
       { name: b"grpc-accept-encoding", value: b"identity" },
     ]
     for h in s.ctx.resp_headers {
-      headers.push(h)
+      headers.push({
+        name: h.name,
+        value: metadata_value_to_wire(h.name, h.value),
+      })
     }
     let block = self.encoder.encode(headers)
     frames.push(
@@ -702,7 +709,10 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
       })
     }
     for h in s.ctx.resp_trailers {
-      trailers.push(h)
+      trailers.push({
+        name: h.name,
+        value: metadata_value_to_wire(h.name, h.value),
+      })
     }
     let block = self.encoder.encode(trailers)
     frames.push(

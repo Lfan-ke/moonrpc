@@ -158,3 +158,37 @@ async test "channel: a call past its deadline is cancelled with DEADLINE_EXCEEDE
     task.cancel()
   })
 }
+
+///|
+async test "channel: -bin metadata base64s on the wire and round-trips as raw bytes" {
+  @async.with_task_group(g => {
+    let server = GrpcServer::new()
+    let raw = b"\x00\x01\xff\x10"
+    server.register_unary("/m.M/Echo", (ctx, _req) => {
+      // The request's -bin metadata is surfaced already base64-decoded; echo it back
+      // as a -bin trailer, which the server re-encodes on the wire.
+      match ctx.metadata_get(b"x-bin") {
+        Some(v) => ctx.add_trailer(b"echo-bin", v)
+        None => ()
+      }
+      b"ok"
+    })
+    let task = g.spawn(() => server.serve(port=18086))
+    @async.sleep(300)
+    let chan = Channel::connect("127.0.0.1", 18086)
+    let reply = chan.unary("/m.M/Echo", b"", metadata=[
+      { name: b"x-bin", value: raw },
+    ])
+    assert_eq(reply.grpc_status, 0)
+    let mut echoed = b""
+    for t in reply.trailers {
+      if t.name == b"echo-bin" {
+        echoed = t.value
+      }
+    }
+    // Raw bytes, not the base64 text that travelled on the wire.
+    assert_eq(echoed == raw, true)
+    chan.close()
+    task.cancel()
+  })
+}

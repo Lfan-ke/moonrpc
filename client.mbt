@@ -224,7 +224,11 @@ fn H2Client::produce_request(self : H2Client, c : ClientCall) -> Array[Frame] {
       None => ()
     }
     for h in c.metadata {
-      headers.push(h)
+      // A `-bin` metadata value goes on the wire base64-encoded.
+      headers.push({
+        name: h.name,
+        value: metadata_value_to_wire(h.name, h.value),
+      })
     }
     let block = self.encoder.encode(headers)
     let end = c.req_ended && c.out.length() == 0
@@ -313,10 +317,17 @@ pub fn H2Client::feed(self : H2Client, frame : Frame) -> Array[Frame] raise {
               ()
             } else if !c.headers_seen {
               if !is_reserved_header(h.name) {
-                c.resp_headers.push(h)
+                // A `-bin` metadata value arrives base64-encoded; surface raw bytes.
+                c.resp_headers.push({
+                  name: h.name,
+                  value: metadata_value_from_wire(h.name, h.value),
+                })
               }
             } else {
-              c.resp_trailers.push(h)
+              c.resp_trailers.push({
+                name: h.name,
+                value: metadata_value_from_wire(h.name, h.value),
+              })
             }
           }
           c.headers_seen = true
