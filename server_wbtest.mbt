@@ -222,7 +222,7 @@ test "engine: a compressed request under an unsupported encoding gets UNIMPLEMEN
   let enc = HpackEncoder::new()
   let block = enc.encode([
     { name: b":path", value: b"/echo.Echo/Say" },
-    { name: b"grpc-encoding", value: b"gzip" },
+    { name: b"grpc-encoding", value: b"snappy" },
   ])
   let _ = engine.feed(Settings(params=[], ack=false))
   let _ = engine.feed(
@@ -235,8 +235,9 @@ test "engine: a compressed request under an unsupported encoding gets UNIMPLEMEN
       padding=0,
     ),
   )
-  // A gRPC message whose compression flag (byte 0) is set: the server must not read
-  // the body as-is, and answers UNIMPLEMENTED since it only supports identity.
+  // A gRPC message whose compression flag (byte 0) is set under an encoding we do not
+  // decode: the server must not read the body as-is, and answers UNIMPLEMENTED since
+  // it accepts only identity and gzip.
   let compressed = b"\x01\x00\x00\x00\x03abc"
   let out = engine.feed(
     Data(stream_id=1, data=compressed, end_stream=true, padding=0),
@@ -255,6 +256,65 @@ test "engine: a compressed request under an unsupported encoding gets UNIMPLEMEN
     }
   }
   assert_eq(grpc_status == b"12", true)
+}
+
+///|
+test "engine: a gzip-compressed request is inflated and reaches the handler" {
+  let engine = H2Server::new()
+  // The handler echoes whatever bytes it receives; a correct decode means the reply
+  // equals the original plaintext, not the gzip bytes.
+  engine.register("/echo.Echo/Say", req => req)
+  let enc = HpackEncoder::new()
+  let block = enc.encode([
+    { name: b":path", value: b"/echo.Echo/Say" },
+    { name: b"grpc-encoding", value: b"gzip" },
+  ])
+  let _ = engine.feed(Settings(params=[], ack=false))
+  let _ = engine.feed(
+    Headers(
+      stream_id=1,
+      fragment=block,
+      end_stream=false,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  // A real gzip member of "hello, gzip world" (CPython gzip.compress), framed as one
+  // gRPC message with the compression flag set.
+  let plaintext = gz_unhex("68656c6c6f2c20677a697020776f726c64")
+  let gz = gz_unhex(
+    "1f8b0800cb9b6a6a02ffcb48cdc9c9d75148afca2c5028cf2fca490100eb83468211000000",
+  )
+  let out = engine.feed(
+    Data(
+      stream_id=1,
+      data=encode_message(gz, compressed=true),
+      end_stream=true,
+      padding=0,
+    ),
+  )
+  let dec = HpackDecoder::new()
+  let mut grpc_status = b""
+  let mut body = b""
+  for f in out {
+    match f {
+      Headers(fragment~, ..) =>
+        for h in dec.decode(fragment) {
+          if h.name == b"grpc-status" {
+            grpc_status = h.value
+          }
+        }
+      Data(data~, ..) => body = concat(body, data)
+      _ => ()
+    }
+  }
+  assert_eq(grpc_status == b"0", true)
+  // The reply frames the decoded plaintext as an identity gRPC message.
+  assert_eq(
+    decode_message(body) is Some((false, msg)) && msg == plaintext,
+    true,
+  )
 }
 
 ///|

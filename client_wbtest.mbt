@@ -49,6 +49,62 @@ fn drive_pair(
 }
 
 ///|
+test "client: a gzip-encoded response message is inflated for the caller" {
+  // Our own server only replies with identity, so hand-feed the client the response
+  // a gzip-compressing peer (e.g. grpc-go with the gzip compressor) would send: a
+  // `grpc-encoding: gzip` header and one reply message with the compression flag set.
+  let client = H2Client::new()
+  let (id, _req) = client.unary("/echo.Echo/Say", b"x")
+  let _ = client.feed(Settings(params=[], ack=false))
+  let enc = HpackEncoder::new()
+  let hblock = enc.encode([
+    { name: b":status", value: b"200" },
+    { name: b"content-type", value: b"application/grpc" },
+    { name: b"grpc-encoding", value: b"gzip" },
+  ])
+  let _ = client.feed(
+    Headers(
+      stream_id=id,
+      fragment=hblock,
+      end_stream=false,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  let gz = gz_unhex(
+    "1f8b0800cb9b6a6a02ffcb48cdc9c9d75148afca2c5028cf2fca490100eb83468211000000",
+  )
+  let _ = client.feed(
+    Data(
+      stream_id=id,
+      data=encode_message(gz, compressed=true),
+      end_stream=false,
+      padding=0,
+    ),
+  )
+  let tblock = enc.encode([{ name: b"grpc-status", value: b"0" }])
+  let _ = client.feed(
+    Headers(
+      stream_id=id,
+      fragment=tblock,
+      end_stream=true,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  let reply = client.reply(id)
+  assert_eq(reply.grpc_status, 0)
+  assert_eq(reply.messages.length(), 1)
+  // The caller sees the plaintext, not the gzip bytes.
+  assert_eq(
+    reply.messages[0] == gz_unhex("68656c6c6f2c20677a697020776f726c64"),
+    true,
+  )
+}
+
+///|
 test "client+server: a unary call round-trips over the two pure engines" {
   let server = H2Server::new()
   server.register("/echo.Echo/Say", req => cat(b"echo:", req))

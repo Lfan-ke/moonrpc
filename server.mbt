@@ -46,9 +46,13 @@ pub(all) struct SrvStream {
   mut trailers_only : Bool
   mut status_code : Int
   mut status_message : String
-  // A request message arrived with the compressed flag set. We advertise (and only
-  // support) identity, so this is answered with UNIMPLEMENTED rather than misreading
-  // the compressed bytes as the message.
+  // The call's `grpc-encoding` (empty when absent, i.e. identity). A compressed
+  // message under `gzip` is inflated in-place; under any other encoding the call is
+  // answered with UNIMPLEMENTED rather than misreading the compressed bytes.
+  mut req_encoding : Bytes
+  // A compressed request arrived under an encoding we cannot decode (or a gzip member
+  // that failed to inflate). Answered with UNIMPLEMENTED, since we could not recover
+  // the message the handler was meant to see.
   mut compressed_unsupported : Bool
   mut headers_sent : Bool
   mut trailers_sent : Bool
@@ -80,6 +84,7 @@ fn SrvStream::new(id : Int, send_window : Int) -> SrvStream {
     trailers_only: false,
     status_code: 0,
     status_message: "",
+    req_encoding: b"",
     compressed_unsupported: false,
     headers_sent: false,
     trailers_sent: false,
@@ -408,10 +413,20 @@ fn drain_messages(s : SrvStream) -> Unit {
       break
     }
     // The message-encoding flag (byte 0): a set flag means the body is compressed
-    // with the call's grpc-encoding, which we do not decode — flag it rather than
-    // hand the compressed bytes to the handler as if they were the message.
+    // with the call's grpc-encoding. We decode `gzip` in place; any other encoding
+    // (or a gzip member that fails to inflate) is flagged rather than handed to the
+    // handler as if the compressed bytes were the message.
     if compressed {
-      s.compressed_unsupported = true
+      let body = all[off + 5:off + 5 + len].to_owned()
+      if s.req_encoding == b"gzip" {
+        let plain = Some(gunzip(body)) catch { _ => None }
+        match plain {
+          Some(m) => s.req_msgs.push(m)
+          None => s.compressed_unsupported = true
+        }
+      } else {
+        s.compressed_unsupported = true
+      }
     } else {
       s.req_msgs.push(all[off + 5:off + 5 + len].to_owned())
     }
@@ -570,6 +585,10 @@ fn H2Server::complete_headers(self : H2Server, s : SrvStream) -> Unit raise {
     Some(v) => parse_grpc_timeout(v)
     None => None
   }
+  s.req_encoding = match header_value(headers, b"grpc-encoding") {
+    Some(v) => v
+    None => b""
+  }
   s.ctx = {
     path: s.path,
     metadata,
@@ -612,7 +631,7 @@ fn H2Server::advance(self : H2Server, s : SrvStream) -> Array[Frame] raise {
     if s.compressed_unsupported && !s.response_ended {
       s.trailers_only = true
       s.status_code = Status::code(Unimplemented)
-      s.status_message = "grpc-encoding not supported; server accepts identity"
+      s.status_message = "grpc-encoding not supported; server accepts identity, gzip"
       s.response_ended = true
       return self.produce(s)
     }
@@ -714,7 +733,7 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
       let tr : Array[Header] = [
         { name: b":status", value: b"200" },
         { name: b"content-type", value: b"application/grpc" },
-        { name: b"grpc-accept-encoding", value: b"identity" },
+        { name: b"grpc-accept-encoding", value: b"identity,gzip" },
         { name: b"grpc-status", value: int_to_ascii_bytes(s.status_code) },
         { name: b"grpc-message", value: percent_encode(s.status_message) },
       ]
@@ -744,7 +763,7 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
       { name: b":status", value: b"200" },
       { name: b"content-type", value: b"application/grpc" },
       { name: b"grpc-encoding", value: b"identity" },
-      { name: b"grpc-accept-encoding", value: b"identity" },
+      { name: b"grpc-accept-encoding", value: b"identity,gzip" },
     ]
     for h in s.ctx.resp_headers {
       headers.push({

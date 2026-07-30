@@ -30,6 +30,9 @@ pub(all) struct ClientCall {
   mut recv_window : Int
   mut status : Bytes
   mut grpc_status : Int?
+  // The response's `grpc-encoding` (empty = identity). A reply message with the
+  // compression flag set under `gzip` is inflated before it reaches the caller.
+  mut resp_encoding : Bytes
   resp_headers : Array[Header]
   resp_trailers : Array[Header]
   mut headers_seen : Bool
@@ -63,6 +66,7 @@ fn ClientCall::new(
     recv_window: default_window_size,
     status: b"",
     grpc_status: None,
+    resp_encoding: b"",
     resp_headers: [],
     resp_trailers: [],
     headers_seen: false,
@@ -315,6 +319,8 @@ pub fn H2Client::feed(self : H2Client, frame : Frame) -> Array[Frame] raise {
               c.grpc_status = Some(ascii_bytes_to_int(h.value))
             } else if h.name == b"grpc-message" {
               ()
+            } else if h.name == b"grpc-encoding" {
+              c.resp_encoding = h.value
             } else if !c.headers_seen {
               if !is_reserved_header(h.name) {
                 // A `-bin` metadata value arrives base64-encoded; surface raw bytes.
@@ -460,6 +466,7 @@ fn drain_call_messages(c : ClientCall) -> Unit {
   let n = all.length()
   let mut off = c.data_off
   while n - off >= 5 {
+    let compressed = all[off].to_int() != 0
     let len = (all[off + 1].to_int() << 24) |
       (all[off + 2].to_int() << 16) |
       (all[off + 3].to_int() << 8) |
@@ -467,7 +474,15 @@ fn drain_call_messages(c : ClientCall) -> Unit {
     if n - off < 5 + len {
       break
     }
-    c.messages.push(all[off + 5:off + 5 + len].to_owned())
+    let body = all[off + 5:off + 5 + len].to_owned()
+    // A reply message with the compression flag set is inflated when the response
+    // encoding is gzip; a decode failure (never expected from a well-behaved server)
+    // falls back to the raw body rather than dropping the message.
+    if compressed && c.resp_encoding == b"gzip" {
+      c.messages.push(gunzip(body) catch { _ => body })
+    } else {
+      c.messages.push(body)
+    }
     off = off + 5 + len
   }
   c.data_off = off
