@@ -323,6 +323,7 @@ pub fn H2Client::feed(self : H2Client, frame : Frame) -> Array[Frame] raise {
           // Start a new header block; END_STREAM rides the HEADERS frame, so remember
           // it to apply once the block (which may continue across CONTINUATION) ends.
           c.header_block.write_bytes(fragment)
+          guard_header_size(c.header_block)
           c.pending_end_stream = end_stream
           if end_headers {
             self.deliver_headers(c)
@@ -339,6 +340,7 @@ pub fn H2Client::feed(self : H2Client, frame : Frame) -> Array[Frame] raise {
         Some(c) =>
           if c.in_headers {
             c.header_block.write_bytes(fragment)
+            guard_header_size(c.header_block)
             if end_headers {
               self.deliver_headers(c)
             }

@@ -6,6 +6,13 @@
 pub let max_message_size : Int = 4 * 1024 * 1024
 
 ///|
+/// The cap on one accumulated header block (HEADERS plus its CONTINUATION frames).
+/// Without it a peer could stream endless non-final CONTINUATION frames and grow the
+/// buffer without bound (a CONTINUATION flood); 128 KiB is far above any real gRPC
+/// request's headers.
+pub let max_header_list_size : Int = 128 * 1024
+
+///|
 /// Encode a payload as a gRPC *Length-Prefixed-Message*: a 1-byte compression
 /// flag, a 4-byte big-endian length, then the payload. This is the framing every
 /// gRPC transport shares (gRPC-Web over HTTP/1.1 and real gRPC over HTTP/2 alike).

@@ -268,6 +268,37 @@ test "add_window saturates at 2^31-1 instead of wrapping negative" {
 }
 
 ///|
+test "engine: a CONTINUATION past the header-size cap is rejected, not buffered forever" {
+  let engine = H2Server::new()
+  let enc = HpackEncoder::new()
+  let block = enc.encode([{ name: b":path", value: b"/e.E/M" }])
+  let _ = engine.feed(Settings(params=[], ack=false))
+  let _ = engine.feed(
+    Headers(
+      stream_id=1,
+      fragment=block,
+      end_stream=false,
+      end_headers=false,
+      priority=None,
+      padding=0,
+    ),
+  )
+  let buf = Buffer()
+  for _i = 0; _i < max_header_list_size + 16; _i = _i + 1 {
+    buf.write_byte(b'\x00')
+  }
+  let raised = try {
+    let _ = engine.feed(
+      Continuation(stream_id=1, fragment=buf.to_bytes(), end_headers=false),
+    )
+    false
+  } catch {
+    _ => true
+  }
+  assert_eq(raised, true)
+}
+
+///|
 test "engine: a HEADERS on an even (server-initiated) stream id is a protocol error" {
   let engine = H2Server::new()
   engine.register("/e.E/M", req => req)

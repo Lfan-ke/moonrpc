@@ -34,6 +34,15 @@ fn add_window(cur : Int, inc : Int) -> Int {
 }
 
 ///|
+/// Raise if an accumulated header block has grown past `max_header_list_size` — the
+/// backstop against a CONTINUATION flood pinning unbounded memory.
+fn guard_header_size(buf : Buffer) -> Unit raise StreamError {
+  if buf.length() > max_header_list_size {
+    raise InvalidTransition("header block exceeds the maximum size")
+  }
+}
+
+///|
 /// One server-side stream: its lifecycle state, the accumulating request header
 /// block and DATA (with a cursor over the length-prefixed messages already pulled
 /// out of it), the per-stream flow-control windows, and the response side — the
@@ -581,6 +590,7 @@ pub fn H2Server::feed(self : H2Server, frame : Frame) -> Array[Frame] raise {
       let s = self.stream(stream_id)
       s.state = s.state.on_recv(Headers(end_stream~))
       s.header_block.write_bytes(fragment)
+      guard_header_size(s.header_block)
       if end_stream {
         s.end_stream_recv = true
       }
@@ -592,6 +602,7 @@ pub fn H2Server::feed(self : H2Server, frame : Frame) -> Array[Frame] raise {
     Continuation(stream_id~, fragment~, end_headers~) => {
       let s = self.stream(stream_id)
       s.header_block.write_bytes(fragment)
+      guard_header_size(s.header_block)
       if end_headers {
         self.complete_headers(s)
       }
