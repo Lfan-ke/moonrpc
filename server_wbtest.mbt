@@ -358,6 +358,20 @@ test "engine: a gzip-compressed request is inflated and reaches the handler" {
 }
 
 ///|
+test "emit_header_frames floors an illegal zero MAX_FRAME_SIZE instead of looping forever" {
+  let buf = Buffer()
+  for _i = 0; _i < 20000; _i = _i + 1 {
+    buf.write_byte(b'\x00')
+  }
+  let block = buf.to_bytes()
+  // A peer MAX_FRAME_SIZE of 0 previously made the split loop advance by zero bytes
+  // and emit empty CONTINUATION frames forever; it now floors to the default and the
+  // 20000-byte block splits into a finite HEADERS + one CONTINUATION.
+  let frames = emit_header_frames(1, block, true, 0)
+  assert_eq(frames.length(), 2)
+}
+
+///|
 test "emit_header_frames splits a block larger than max_frame into HEADERS + CONTINUATION" {
   // 10-byte block, max_frame 4 -> HEADERS(4, end_headers=false) + CONTINUATION(4) +
   // CONTINUATION(2, end_headers=true).

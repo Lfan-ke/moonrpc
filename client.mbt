@@ -380,15 +380,29 @@ pub fn H2Client::feed(self : H2Client, frame : Frame) -> Array[Frame] raise {
 /// `INITIAL_WINDOW_SIZE` onto every open call's send window (RFC 7540 §6.9.2).
 fn H2Client::apply_setting(self : H2Client, id : Int, value : Int) -> Unit {
   if id == settings_initial_window_size {
+    // Ignore an out-of-range window (RFC 7540 §6.5.2 caps it at 2^31-1) rather than
+    // letting a negative value corrupt every call's send-window math.
+    if value < 0 {
+      return
+    }
     let delta = value - self.remote_initial_window
     self.remote_initial_window = value
     for _, c in self.calls {
       c.send_window = c.send_window + delta
     }
   } else if id == settings_max_frame_size {
-    self.remote_max_frame = value
+    // Clamp to the RFC 7540 §6.5.2 range [2^14, 2^24-1].
+    self.remote_max_frame = if value < default_max_frame_size {
+      default_max_frame_size
+    } else if value > 0xFFFFFF {
+      0xFFFFFF
+    } else {
+      value
+    }
   } else if id == settings_header_table_size {
-    self.encoder.table.set_max_size(value)
+    if value >= 0 {
+      self.encoder.table.set_max_size(value)
+    }
   }
 }
 

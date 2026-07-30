@@ -250,8 +250,15 @@ fn emit_header_frames(
   stream_id : Int,
   block : Bytes,
   end_stream : Bool,
-  max_frame : Int,
+  max_frame_in : Int,
 ) -> Array[Frame] {
+  // Never fragment at zero: a bad peer MAX_FRAME_SIZE is clamped on apply, but floor
+  // here too so the split loop always advances rather than looping on empty chunks.
+  let max_frame = if max_frame_in < 1 {
+    default_max_frame_size
+  } else {
+    max_frame_in
+  }
   let frames : Array[Frame] = []
   if block.length() <= max_frame {
     frames.push(
@@ -465,15 +472,30 @@ fn H2Server::stream(self : H2Server, id : Int) -> SrvStream {
 /// shifts every open stream's send window by the delta (RFC 7540 §6.9.2).
 fn H2Server::apply_setting(self : H2Server, id : Int, value : Int) -> Unit {
   if id == settings_initial_window_size {
+    // Ignore an out-of-range window (RFC 7540 §6.5.2 caps it at 2^31-1; a value with
+    // the high bit set decodes negative here) rather than corrupting send-window math.
+    if value < 0 {
+      return
+    }
     let delta = value - self.remote_initial_window
     self.remote_initial_window = value
     for _, s in self.streams {
       s.send_window = s.send_window + delta
     }
   } else if id == settings_max_frame_size {
-    self.remote_max_frame = value
+    // Clamp to the RFC 7540 §6.5.2 range [2^14, 2^24-1]; a smaller value (e.g. 0)
+    // would stall header emission in an endless empty-CONTINUATION loop.
+    self.remote_max_frame = if value < default_max_frame_size {
+      default_max_frame_size
+    } else if value > 0xFFFFFF {
+      0xFFFFFF
+    } else {
+      value
+    }
   } else if id == settings_header_table_size {
-    self.encoder.table.set_max_size(value)
+    if value >= 0 {
+      self.encoder.table.set_max_size(value)
+    }
   }
 }
 
