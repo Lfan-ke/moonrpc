@@ -1,9 +1,11 @@
-// Server-side interceptors: a chain wrapped around a method handler, the gRPC
-// equivalent of Go's `UnaryServerInterceptor` / `StreamServerInterceptor`. An
-// interceptor sees the call context and request, may inspect or replace them, and
-// calls `next` to invoke the rest of the chain (ending at the registered handler).
-// Registration order is outer-to-inner: the first-registered interceptor runs
-// first and wraps everything after it.
+// Server-side interceptors: a chain wrapped around a method handler. Both kinds take
+// a single request message, so they wrap the unary (`(ctx, req) -> reply`) and
+// server-streaming (`(ctx, req) -> [reply]`) cardinalities; client-streaming and bidi,
+// whose requests are a stream, are not wrapped (a stream interceptor over those needs
+// a request-stream abstraction the eager engine does not yet expose). An interceptor
+// sees the call context and request, may inspect or replace them, and calls `next` to
+// invoke the rest of the chain (ending at the registered handler). Registration order
+// is outer-to-inner: the first-registered interceptor runs first and wraps the rest.
 
 ///|
 /// A unary server interceptor: `(ctx, request, next) -> reply`, where `next` is the

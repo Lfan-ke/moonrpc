@@ -4,9 +4,11 @@
 // client so `grpcurl` can `list` and `describe` a service: reflection returns the
 // serialised `FileDescriptorProto` of the file that defines a symbol. The model is
 // built programmatically (a service registers its descriptor in code) and both
-// encodes to and decodes from the wire, so a `FileDescriptorSet` produced by
-// `protoc` round-trips through the same types. Field numbers below are the ones
-// fixed by descriptor.proto.
+// encodes to and decodes from the wire. It carries the fields Server Reflection uses
+// — package, message names and fields, services and methods — enough to describe a
+// self-contained proto; enum, nested-type, import, and option fields are skipped on
+// decode (and so not re-emitted), so a `protoc` set that uses them re-encodes to that
+// modelled subset. Field numbers below are the ones fixed by descriptor.proto.
 
 ///|
 /// The `FieldDescriptorProto.Type` enum (proto3's scalar and composite field
