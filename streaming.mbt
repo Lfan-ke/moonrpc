@@ -20,6 +20,9 @@ pub(all) struct RpcContext {
   // (`(code, message)`); the server emits it as the `grpc-status` / `grpc-message`
   // trailer and discards any reply the handler also returned.
   mut status_fail : (Int, String)?
+  // Serialized `google.protobuf.Any` details attached to a non-OK status; the server
+  // packs them into a `google.rpc.Status` and emits it as `grpc-status-details-bin`.
+  error_details : Array[Bytes]
 }
 
 ///|
@@ -33,6 +36,7 @@ pub fn RpcContext::empty() -> RpcContext {
     resp_headers: [],
     resp_trailers: [],
     status_fail: None,
+    error_details: [],
   }
 }
 
@@ -48,6 +52,16 @@ pub fn RpcContext::fail(
   message : String,
 ) -> Unit {
   self.status_fail = Some((code, message))
+}
+
+///|
+/// Attach a rich-error detail (a serialized `google.protobuf.Any`) to a failing
+/// call. The server packs the status code, message, and every detail into a
+/// `google.rpc.Status` and sends it base64-encoded in the `grpc-status-details-bin`
+/// trailer — gRPC's rich-error channel. Combine with `fail`, which sets the base
+/// `grpc-status` / `grpc-message`.
+pub fn RpcContext::add_error_detail(self : RpcContext, detail : Bytes) -> Unit {
+  self.error_details.push(detail)
 }
 
 ///|

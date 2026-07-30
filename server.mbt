@@ -222,6 +222,24 @@ fn bytes_to_ascii(b : Bytes) -> String {
 }
 
 ///|
+/// Serialize a `google.rpc.Status` (`code` = 1, `message` = 2, repeated `details` =
+/// 3, each an already-serialized `google.protobuf.Any`) to its protobuf wire bytes —
+/// the payload of the `grpc-status-details-bin` trailer that carries rich errors.
+fn encode_status_details(
+  code : Int,
+  message : String,
+  details : Array[Bytes],
+) -> Bytes {
+  let w = PbWriter::new()
+  w.int32(1, code)
+  w.string_(2, message)
+  for d in details {
+    w.message_(3, d)
+  }
+  w.to_bytes()
+}
+
+///|
 /// Percent-encode a `grpc-message` value (gRPC spec §"Responses"): a UTF-8 string
 /// whose bytes outside printable ASCII `%x20-%x7E`, and `%` itself, are written as
 /// `%XX` with uppercase hex. Lets a status message carry spaces, punctuation, and
@@ -494,6 +512,7 @@ fn H2Server::complete_headers(self : H2Server, s : SrvStream) -> Unit raise {
     resp_headers: [],
     resp_trailers: [],
     status_fail: None,
+    error_details: [],
   }
   s.headers_complete = true
 }
@@ -627,13 +646,26 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
   let frames : Array[Frame] = []
   if s.trailers_only {
     if !s.trailers_sent {
-      let block = self.encoder.encode([
+      let tr : Array[Header] = [
         { name: b":status", value: b"200" },
         { name: b"content-type", value: b"application/grpc" },
         { name: b"grpc-accept-encoding", value: b"identity" },
         { name: b"grpc-status", value: int_to_ascii_bytes(s.status_code) },
         { name: b"grpc-message", value: percent_encode(s.status_message) },
-      ])
+      ]
+      if s.status_code != 0 {
+        tr.push({
+          name: b"grpc-status-details-bin",
+          value: base64_encode(
+            encode_status_details(
+              s.status_code,
+              s.status_message,
+              s.ctx.error_details,
+            ),
+          ),
+        })
+      }
+      let block = self.encoder.encode(tr)
       frames.push(
         Headers(
           stream_id=s.id,
@@ -706,6 +738,18 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
       trailers.push({
         name: b"grpc-message",
         value: percent_encode(s.status_message),
+      })
+    }
+    if s.status_code != 0 {
+      trailers.push({
+        name: b"grpc-status-details-bin",
+        value: base64_encode(
+          encode_status_details(
+            s.status_code,
+            s.status_message,
+            s.ctx.error_details,
+          ),
+        ),
       })
     }
     for h in s.ctx.resp_trailers {

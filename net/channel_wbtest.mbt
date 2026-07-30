@@ -192,3 +192,53 @@ async test "channel: -bin metadata base64s on the wire and round-trips as raw by
     task.cancel()
   })
 }
+
+///|
+async test "channel: a failing call carries a google.rpc.Status in grpc-status-details-bin" {
+  @async.with_task_group(g => {
+    let server = GrpcServer::new()
+    server.register_unary("/e.E/Fail", (ctx, _req) => {
+      ctx.fail(@moonrpc.Status::code(NotFound), "no such row")
+      ctx.add_error_detail(b"detail-any-bytes")
+      b""
+    })
+    let task = g.spawn(() => server.serve(port=18087))
+    @async.sleep(300)
+    let chan = Channel::connect("127.0.0.1", 18087)
+    let reply = chan.unary("/e.E/Fail", b"")
+    assert_eq(reply.grpc_status, @moonrpc.Status::code(NotFound))
+    // The grpc-status-details-bin trailer carries a serialized google.rpc.Status,
+    // arriving already base64-decoded (the -bin convention).
+    // For a trailers-only failure the status rides the single HEADERS frame, which
+    // the client surfaces as initial metadata, so look in both header sets.
+    let mut details = b""
+    for t in reply.headers {
+      if t.name == b"grpc-status-details-bin" {
+        details = t.value
+      }
+    }
+    for t in reply.trailers {
+      if t.name == b"grpc-status-details-bin" {
+        details = t.value
+      }
+    }
+    let r = @moonrpc.PbReader::new(details)
+    let mut code = 0
+    let mut msg = ""
+    let mut detail = b""
+    while !r.eof() {
+      let (field, wire) = r.read_tag()
+      match field {
+        1 => code = r.read_int32()
+        2 => msg = r.read_string()
+        3 => detail = r.read_bytes()
+        _ => r.skip(wire)
+      }
+    }
+    assert_eq(code, @moonrpc.Status::code(NotFound))
+    assert_eq(msg == "no such row", true)
+    assert_eq(detail == b"detail-any-bytes", true)
+    chan.close()
+    task.cancel()
+  })
+}
