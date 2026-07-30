@@ -29,6 +29,40 @@ async test "mux channel: two concurrent unary calls multiplex on one connection"
 }
 
 ///|
+async test "mux channel: keepalive keeps a live connection healthy by pinging" {
+  @async.with_task_group(g => {
+    let server = GrpcServer::new()
+    server.register("/echo.E/Say", req => cat(b"echo:", req))
+    let ts = g.spawn(() => server.serve(port=18110))
+    @async.sleep(300)
+    let ch = MuxChannel::connect("127.0.0.1", 18110)
+    let tp = g.spawn(() => ch.read_pump())
+    // Ping after 120 ms idle; a missing ACK within 300 ms would declare the connection dead.
+    let tk = g.spawn(() => {
+      ch.run_keepalive(keepalive_time=120L, keepalive_timeout=300L)
+    })
+    // Stay idle across several ping/pong cycles — the live server ACKs every PING.
+    @async.sleep(600)
+    // Still healthy: a call succeeds because the ACKs kept the connection from timing out.
+    // Bounded so that if keepalive wrongly closed the connection, this fails cleanly.
+    let r = (
+      @async.with_timeout_opt(2000, () => ch.unary("/echo.E/Say", b"x")) :
+      @moonrpc.CallReply?)
+    match r {
+      Some(reply) => {
+        assert_eq(reply.grpc_status, 0)
+        assert_eq(reply.messages[0] == b"echo:x", true)
+      }
+      None => fail("keepalive closed a healthy connection")
+    }
+    tk.cancel()
+    ts.cancel()
+    let _ = tp.wait()
+    ch.close()
+  })
+}
+
+///|
 async test "mux channel: many concurrent calls on one connection each get their own reply" {
   @async.with_task_group(g => {
     let server = GrpcServer::new()

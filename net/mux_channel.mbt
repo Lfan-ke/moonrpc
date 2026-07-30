@@ -15,6 +15,7 @@ pub struct MuxChannel {
   engine : @moonrpc.H2Client
   write_lock : @async.Mutex
   inboxes : Map[Int, @aqueue.Queue[Unit]]
+  mut keepalive : @moonrpc.Keepalive?
 }
 
 ///|
@@ -26,7 +27,13 @@ pub async fn MuxChannel::connect(host : String, port : Int) -> MuxChannel {
   )
   let engine = @moonrpc.H2Client::new()
   conn.write(@moonrpc.connection_preface)
-  let ch = { conn, engine, write_lock: @async.Mutex::Mutex(), inboxes: Map([]) }
+  let ch = {
+    conn,
+    engine,
+    write_lock: @async.Mutex::Mutex(),
+    inboxes: Map([]),
+    keepalive: None,
+  }
   ch.write_locked(engine.preface())
   ch
 }
@@ -50,6 +57,13 @@ async fn MuxChannel::write_locked(
 pub async fn MuxChannel::read_pump(self : MuxChannel) -> Unit {
   for ;; {
     let frame = read_frame(self.conn) catch { _ => return }
+    if self.keepalive is Some(ka) {
+      let now = @async.now()
+      ka.on_activity(now)
+      if frame is @moonrpc.Frame::Ping(ack=true, ..) {
+        ka.on_ping_ack(now)
+      }
+    }
     let out = self.engine.feed(frame) catch { _ => [] }
     if out.length() > 0 {
       self.write_locked(out)
@@ -91,6 +105,50 @@ pub async fn MuxChannel::unary(
   inbox.get()
   self.inboxes.remove(id)
   self.engine.reply(id)
+}
+
+///|
+/// Drive keepalive on this channel: after `keepalive_time` ms of no traffic, send an HTTP/2
+/// PING; if its ACK doesn't come back within `keepalive_timeout` ms the connection is
+/// declared dead and closed (← gRPC `keepalive_time`/`keepalive_timeout`). The read pump
+/// records incoming activity and PING ACKs. Spawn this alongside `read_pump`.
+pub async fn MuxChannel::run_keepalive(
+  self : MuxChannel,
+  keepalive_time~ : Int64,
+  keepalive_timeout~ : Int64,
+) -> Unit {
+  let ka = @moonrpc.Keepalive::new(
+    keepalive_time~,
+    keepalive_timeout~,
+    now=@async.now(),
+  )
+  self.keepalive = Some(ka)
+  // Poll finely enough to notice both the idle threshold and the ACK deadline.
+  let span = if keepalive_timeout < keepalive_time {
+    keepalive_timeout
+  } else {
+    keepalive_time
+  }
+  let poll = if span > 1L { (span / 2L).to_int() } else { 1 }
+  for ;; {
+    @async.sleep(poll)
+    let now = @async.now()
+    if ka.is_timed_out(now) {
+      self.close()
+      return
+    }
+    if ka.should_ping(now) {
+      ka.on_ping_sent(now)
+      self.write_locked([
+        @moonrpc.Frame::Ping(
+          payload=b"\x00\x00\x00\x00\x00\x00\x00\x01",
+          ack=false,
+        ),
+      ]) catch {
+        _ => return
+      }
+    }
+  }
 }
 
 ///|
