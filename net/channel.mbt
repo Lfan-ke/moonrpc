@@ -74,6 +74,7 @@ async fn Channel::drive(
           {
             status: b"",
             grpc_status: @moonrpc.Status::code(DeadlineExceeded),
+            grpc_message: "deadline exceeded",
             headers: [],
             messages: [],
             trailers: [],
@@ -145,6 +146,7 @@ pub async fn Channel::unary(
               {
                 status: b"",
                 grpc_status: @moonrpc.Status::code(DeadlineExceeded),
+                grpc_message: "deadline exceeded",
                 headers: [],
                 messages: [],
                 trailers: [],

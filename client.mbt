@@ -30,6 +30,8 @@ pub(all) struct ClientCall {
   mut recv_window : Int
   mut status : Bytes
   mut grpc_status : Int?
+  // The peer's `grpc-message` (percent-decoded); empty when none was sent.
+  mut grpc_message : String
   // The response's `grpc-encoding` (empty = identity). A reply message with the
   // compression flag set under `gzip` is inflated before it reaches the caller.
   mut resp_encoding : Bytes
@@ -76,6 +78,7 @@ fn ClientCall::new(
     recv_window: default_window_size,
     status: b"",
     grpc_status: None,
+    grpc_message: "",
     resp_encoding: b"",
     resp_headers: [],
     resp_trailers: [],
@@ -95,6 +98,7 @@ fn ClientCall::new(
 pub(all) struct CallReply {
   status : Bytes
   grpc_status : Int
+  grpc_message : String
   headers : Array[Header]
   messages : Array[Bytes]
   trailers : Array[Header]
@@ -393,7 +397,7 @@ fn H2Client::deliver_headers(self : H2Client, c : ClientCall) -> Unit raise {
     } else if h.name == b"grpc-status" {
       c.grpc_status = Some(ascii_bytes_to_int(h.value))
     } else if h.name == b"grpc-message" {
-      ()
+      c.grpc_message = percent_decode(h.value)
     } else if h.name == b"grpc-encoding" {
       c.resp_encoding = h.value
     } else if !c.headers_seen {
@@ -510,13 +514,21 @@ pub fn H2Client::reply(self : H2Client, id : Int) -> CallReply {
       {
         status: c.status,
         grpc_status: grpc,
+        grpc_message: c.grpc_message,
         headers: c.resp_headers,
         messages: c.messages,
         trailers: c.resp_trailers,
       }
     }
     None =>
-      { status: b"", grpc_status: -1, headers: [], messages: [], trailers: [] }
+      {
+        status: b"",
+        grpc_status: -1,
+        grpc_message: "",
+        headers: [],
+        messages: [],
+        trailers: [],
+      }
   }
 }
 
@@ -615,4 +627,46 @@ pub fn encode_grpc_timeout(millis : Int) -> Bytes {
   } else {
     cat(int_to_ascii_bytes(millis / 1000), b"S")
   }
+}
+
+///|
+/// The hex-digit value of an ASCII byte (`0-9`, `A-F`, `a-f`), or `None`.
+fn hex_val(b : Byte) -> Int? {
+  let c = b.to_int()
+  if c >= 0x30 && c <= 0x39 {
+    Some(c - 0x30)
+  } else if c >= 0x41 && c <= 0x46 {
+    Some(c - 0x41 + 10)
+  } else if c >= 0x61 && c <= 0x66 {
+    Some(c - 0x61 + 10)
+  } else {
+    None
+  }
+}
+
+///|
+/// Percent-decode a received `grpc-message` value — the inverse of the server's `percent_encode`
+/// (gRPC spec §"Responses"): each `%XX` escape becomes the byte its two hex digits name, every other
+/// byte passes through, and a malformed escape is left literal; the result is read as UTF-8.
+pub fn percent_decode(v : Bytes) -> String {
+  let out = Buffer()
+  let mut i = 0
+  while i < v.length() {
+    if v[i] == b'%' && i + 2 < v.length() {
+      match (hex_val(v[i + 1]), hex_val(v[i + 2])) {
+        (Some(hi), Some(lo)) => {
+          out.write_byte((hi * 16 + lo).to_byte())
+          i = i + 3
+        }
+        _ => {
+          out.write_byte(v[i])
+          i = i + 1
+        }
+      }
+    } else {
+      out.write_byte(v[i])
+      i = i + 1
+    }
+  }
+  @utf8.decode_lossy(out.to_bytes()[:])
 }
