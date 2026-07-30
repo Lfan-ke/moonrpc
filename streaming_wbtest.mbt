@@ -157,13 +157,8 @@ test "client-streaming: many request messages aggregate into one reply" {
     data_msg(b"c", end_stream=true),
   ])
   assert_eq(c.messages.length(), 1)
-  // to_string() of Bytes is not ASCII text, so compare the message bytes directly.
-  let got = c.messages[0]
-  assert_eq(got[0] == b'g' && got[1] == b'o' && got[2] == b't', true)
-  // three messages were collected before the reply fired.
-  assert_eq(got[got.length() - 5] == b'a', true)
-  assert_eq(got[got.length() - 3] == b'b', true)
-  assert_eq(got[got.length() - 1] == b'c', true)
+  // All three messages were collected, in order, before the reply fired.
+  assert_eq(c.messages[0] == b"got:/a/b/c", true)
   assert_eq(c.grpc_status == b"0", true)
   assert_eq(engine.stream_state(1), Closed)
 }

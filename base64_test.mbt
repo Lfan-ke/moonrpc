@@ -31,3 +31,11 @@ test "the -bin metadata convention base64s only binary keys" {
   assert_eq(@moonrpc.metadata_value_to_wire(b"x-id", b"abc") == b"abc", true)
   assert_eq(@moonrpc.metadata_value_from_wire(b"x-id", b"abc") == b"abc", true)
 }
+
+///|
+test "base64_decode skips embedded whitespace" {
+  // "aGk=" is base64 for "hi"; an interior newline (as PEM/wrapped output carries) is
+  // skipped rather than treated as data.
+  assert_eq(@moonrpc.base64_decode(b"aGk=") == b"hi", true)
+  assert_eq(@moonrpc.base64_decode(b"aG\nk=") == b"hi", true)
+}
