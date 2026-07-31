@@ -19,6 +19,7 @@ fn unavailable_reply() -> @moonrpc.CallReply {
   {
     status: b"",
     grpc_status: @moonrpc.Status::code(Unavailable),
+    grpc_message: "no backend available",
     headers: [],
     messages: [],
     trailers: [],
