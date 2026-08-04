@@ -405,3 +405,37 @@ test "client: an odd stream id is allocated per call" {
   assert_eq(client.open("/a/b"), 3)
   assert_eq(client.open("/a/b"), 5)
 }
+
+///|
+test "client: a GOAWAY drains the connection — refuses new streams, marks unprocessed calls retryable" {
+  let client = H2Client::new()
+  // Three in-flight calls straddling the peer's last-processed id 233: one well below,
+  // one exactly at it, one above.
+  let below = client.open("/qwq/hhh")
+  client.next_id = 233
+  let at = client.open("/emm/qwe")
+  let above = client.open("/hhh/emm")
+  assert_eq(below, 1)
+  assert_eq(at, 233)
+  assert_eq(above, 235)
+
+  // The peer starts draining at stream 233.
+  let out = client.feed(
+    GoAway(last_stream_id=233, error_code=error_no_error, debug=b""),
+  )
+  // A GOAWAY is answered with no frames.
+  assert_eq(out.length(), 0)
+  assert_eq(client.goaway_received(), true)
+  assert_eq(client.goaway_last_stream_id(), 233)
+
+  // Only the call above the last-processed id is safe to retry; the one exactly at it
+  // (the server may have handled it) and the one below are not.
+  assert_eq(client.is_retryable(above), true)
+  assert_eq(client.is_retryable(at), false)
+  assert_eq(client.is_retryable(below), false)
+
+  // No new RPC starts on a draining connection: open is refused with the reserved id 0
+  // and no stream id is consumed.
+  assert_eq(client.open("/qwe/qwq"), 0)
+  assert_eq(client.next_id, 237)
+}

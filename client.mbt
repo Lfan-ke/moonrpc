@@ -48,6 +48,10 @@ pub(all) struct ClientCall {
   // encoding). The call fails INTERNAL and a later trailer `grpc-status` must not
   // overwrite that back to OK.
   mut decode_failed : Bool
+  // Left set when a GOAWAY names a last-processed stream id below this call's: the
+  // server never saw this stream, so re-issuing the RPC is safe (gRPC transport
+  // GOAWAY, RFC 7540 §6.8).
+  mut retryable : Bool
   mut done : Bool
 }
 
@@ -87,6 +91,7 @@ fn ClientCall::new(
     in_headers: false,
     pending_end_stream: false,
     decode_failed: false,
+    retryable: false,
     done: false,
   }
 }
@@ -118,6 +123,11 @@ pub struct H2Client {
   mut conn_recv_window : Int
   mut remote_initial_window : Int
   mut remote_max_frame : Int
+  mut goaway_received : Bool
+  // The peer's last processed stream id from its GOAWAY (RFC 7540 §6.8): calls above
+  // it were never seen by the server, so they are safe to re-issue on a fresh
+  // connection. Mirrors `H2Server::last_client_stream`.
+  mut goaway_last_stream_id : Int
 }
 
 ///|
@@ -132,6 +142,8 @@ pub fn H2Client::new() -> H2Client {
     conn_recv_window: default_window_size,
     remote_initial_window: default_window_size,
     remote_max_frame: default_max_frame_size,
+    goaway_received: false,
+    goaway_last_stream_id: 0,
   }
 }
 
@@ -156,6 +168,13 @@ pub fn H2Client::open(
   authority? : String = "127.0.0.1",
   timeout_millis? : Int? = None,
 ) -> Int {
+  // A draining connection (the peer sent GOAWAY) starts no new stream: it would race
+  // the shutdown and never be processed. Refuse with the reserved stream id 0 (§5.1.1,
+  // never a real call) so no HEADERS leave and no id is consumed; the caller surfaces
+  // this as UNAVAILABLE (the client's unusable-transport status, `unavailable_reply`).
+  if self.goaway_received {
+    return 0
+  }
   let id = self.next_id
   self.next_id = self.next_id + 2
   let timeout = match timeout_millis {
@@ -380,7 +399,20 @@ pub fn H2Client::feed(self : H2Client, frame : Frame) -> Array[Frame] raise {
       }
       []
     }
-    GoAway(..) | Priority(..) | PushPromise(..) | Unknown(..) => []
+    GoAway(last_stream_id~, ..) => {
+      // The peer is draining (RFC 7540 §6.8): remember it so `open` refuses new
+      // streams, and mark every in-flight call above its last processed id retryable —
+      // those were never seen by the server, so re-issuing them is safe (gRPC A6).
+      self.goaway_received = true
+      self.goaway_last_stream_id = last_stream_id
+      for _, c in self.calls {
+        if c.id > last_stream_id {
+          c.retryable = true
+        }
+      }
+      []
+    }
+    Priority(..) | PushPromise(..) | Unknown(..) => []
   }
 }
 
@@ -495,6 +527,32 @@ pub fn H2Client::is_done(self : H2Client, id : Int) -> Bool {
   match self.calls.get(id) {
     Some(c) => c.done
     None => true
+  }
+}
+
+///|
+/// Whether the peer has sent GOAWAY; a draining connection opens no new stream, so
+/// the driver picks a fresh one for further calls. Mirrors `H2Server::goaway_received`.
+pub fn H2Client::goaway_received(self : H2Client) -> Bool {
+  self.goaway_received
+}
+
+///|
+/// The peer's last processed stream id from its GOAWAY (`0` if none was seen); a call
+/// whose stream id is above it was never handled by the server.
+pub fn H2Client::goaway_last_stream_id(self : H2Client) -> Int {
+  self.goaway_last_stream_id
+}
+
+///|
+/// Whether call `id` was left retryable by a GOAWAY: its stream id is above the peer's
+/// last processed id, so the server never saw it and re-issuing the RPC on a fresh
+/// connection is safe (gRPC transport GOAWAY / RFC 7540 §6.8). False for a call at or
+/// below that id — it may have been processed — and when no GOAWAY arrived.
+pub fn H2Client::is_retryable(self : H2Client, id : Int) -> Bool {
+  match self.calls.get(id) {
+    Some(c) => c.retryable
+    None => false
   }
 }
 
