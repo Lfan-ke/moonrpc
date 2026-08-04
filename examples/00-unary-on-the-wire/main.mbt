@@ -39,6 +39,7 @@ fn request_headers(rpc : @moonrpc.Method) -> Array[@moonrpc.Header] {
 }
 
 ///|
+#coverage.skip
 fn main {
   let rpc = @moonrpc.Method::{ service: "greet.Greeter", name: "SayHello" }
   let headers = request_headers(rpc)
