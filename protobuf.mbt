@@ -19,6 +19,7 @@ pub(all) enum WireType {
 } derive(Eq)
 
 ///|
+/// Prints the wire type by its protobuf name rather than its number.
 pub impl Show for WireType with fn output(self, logger) {
   logger.write_string(
     match self {
@@ -66,6 +67,7 @@ pub suberror PbError {
 } derive(Eq)
 
 ///|
+/// Prints the field and offset the decode failed on.
 pub impl Show for PbError with fn output(self, logger) {
   match self {
     Truncated => logger.write_string("Truncated")

@@ -11,6 +11,7 @@ pub suberror HpackError {
 } derive(Eq)
 
 ///|
+/// Prints the header block and the offset it gave up at.
 pub impl Show for HpackError with fn output(self, logger) {
   match self {
     HuffmanError(m) => logger.write_string("HuffmanError(" + m + ")")

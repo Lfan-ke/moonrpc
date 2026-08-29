@@ -8,30 +8,39 @@
 pub let frame_data : Int = 0x0
 
 ///|
+/// HEADERS: opens a stream and carries its HPACK header block.
 pub let frame_headers : Int = 0x1
 
 ///|
+/// PRIORITY: the deprecated stream-dependency hint; accepted and ignored.
 pub let frame_priority : Int = 0x2
 
 ///|
+/// RST_STREAM: abort one stream without touching the connection.
 pub let frame_rst_stream : Int = 0x3
 
 ///|
+/// SETTINGS: the connection parameters each peer announces, and their ack.
 pub let frame_settings : Int = 0x4
 
 ///|
+/// PUSH_PROMISE: server push, which gRPC never uses.
 pub let frame_push_promise : Int = 0x5
 
 ///|
+/// PING: the round-trip probe keepalive is built on.
 pub let frame_ping : Int = 0x6
 
 ///|
+/// GOAWAY: stop opening streams, and here is the last id I accepted.
 pub let frame_goaway : Int = 0x7
 
 ///|
+/// WINDOW_UPDATE: hand the peer more flow-control credit.
 pub let frame_window_update : Int = 0x8
 
 ///|
+/// CONTINUATION: the rest of a header block too large for one frame.
 pub let frame_continuation : Int = 0x9
 
 ///|
@@ -44,12 +53,15 @@ pub let flag_end_stream : Int = 0x1
 pub let flag_ack : Int = 0x1
 
 ///|
+/// END_HEADERS: no CONTINUATION follows this header block.
 pub let flag_end_headers : Int = 0x4
 
 ///|
+/// PADDED: a length byte and that many padding bytes wrap the payload.
 pub let flag_padded : Int = 0x8
 
 ///|
+/// PRIORITY: this HEADERS frame carries a stream-dependency block.
 pub let flag_priority : Int = 0x20
 
 ///|
@@ -57,18 +69,23 @@ pub let flag_priority : Int = 0x20
 pub let settings_header_table_size : Int = 0x1
 
 ///|
+/// SETTINGS_ENABLE_PUSH: whether the peer may send PUSH_PROMISE.
 pub let settings_enable_push : Int = 0x2
 
 ///|
+/// SETTINGS_MAX_CONCURRENT_STREAMS: how many streams may be open at once.
 pub let settings_max_concurrent_streams : Int = 0x3
 
 ///|
+/// SETTINGS_INITIAL_WINDOW_SIZE: the flow-control credit a new stream starts with.
 pub let settings_initial_window_size : Int = 0x4
 
 ///|
+/// SETTINGS_MAX_FRAME_SIZE: the largest payload the peer will accept in one frame.
 pub let settings_max_frame_size : Int = 0x5
 
 ///|
+/// SETTINGS_MAX_HEADER_LIST_SIZE: the advisory ceiling on a decoded header list.
 pub let settings_max_header_list_size : Int = 0x6
 
 ///|
@@ -76,42 +93,55 @@ pub let settings_max_header_list_size : Int = 0x6
 pub let error_no_error : Int = 0x0
 
 ///|
+/// PROTOCOL_ERROR: the peer broke the protocol in a way not covered below.
 pub let error_protocol_error : Int = 0x1
 
 ///|
+/// INTERNAL_ERROR: the endpoint failed for reasons of its own.
 pub let error_internal_error : Int = 0x2
 
 ///|
+/// FLOW_CONTROL_ERROR: the peer sent more than its credit allowed.
 pub let error_flow_control_error : Int = 0x3
 
 ///|
+/// SETTINGS_TIMEOUT: a SETTINGS frame went unacknowledged too long.
 pub let error_settings_timeout : Int = 0x4
 
 ///|
+/// STREAM_CLOSED: a frame arrived for a stream that was already finished.
 pub let error_stream_closed : Int = 0x5
 
 ///|
+/// FRAME_SIZE_ERROR: the frame's length is invalid for its type.
 pub let error_frame_size_error : Int = 0x6
 
 ///|
+/// REFUSED_STREAM: the stream was declined before any processing, so it is safe to retry.
 pub let error_refused_stream : Int = 0x7
 
 ///|
+/// CANCEL: the stream is no longer wanted.
 pub let error_cancel : Int = 0x8
 
 ///|
+/// COMPRESSION_ERROR: the HPACK context is corrupt, which kills the connection.
 pub let error_compression_error : Int = 0x9
 
 ///|
+/// CONNECT_ERROR: the TCP connection behind a CONNECT stream failed.
 pub let error_connect_error : Int = 0xA
 
 ///|
+/// ENHANCE_YOUR_CALM: the peer is generating too much load.
 pub let error_enhance_your_calm : Int = 0xB
 
 ///|
+/// INADEQUATE_SECURITY: the transport does not meet the minimum this endpoint requires.
 pub let error_inadequate_security : Int = 0xC
 
 ///|
+/// HTTP_1_1_REQUIRED: the request cannot be served over HTTP/2.
 pub let error_http_1_1_required : Int = 0xD
 
 ///|
@@ -134,6 +164,8 @@ pub suberror FrameError {
 } derive(Eq)
 
 ///|
+/// Frame errors print as the wire fault they are, so a log line names the frame
+/// and the field that was wrong.
 pub impl Show for FrameError with fn output(self, logger) {
   match self {
     Incomplete => logger.write_string("Incomplete")

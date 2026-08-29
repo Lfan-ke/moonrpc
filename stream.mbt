@@ -15,6 +15,7 @@ pub(all) enum StreamState {
 } derive(Eq, Debug)
 
 ///|
+/// Prints the RFC 7540 §5.1 state name.
 pub impl Show for StreamState with fn output(self, logger) {
   logger.write_string(
     match self {
@@ -49,6 +50,7 @@ pub suberror StreamError {
 } derive(Eq)
 
 ///|
+/// Prints which transition was refused.
 pub impl Show for StreamError with fn output(self, logger) {
   match self {
     InvalidTransition(m) => logger.write_string("InvalidTransition(" + m + ")")
