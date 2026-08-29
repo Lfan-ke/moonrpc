@@ -278,7 +278,7 @@ async test "channel: -bin metadata base64s on the wire and round-trips as raw by
     @async.sleep(300)
     let chan = Channel::connect("127.0.0.1", 18086)
     let reply = chan.unary("/m.M/Echo", b"", metadata=[
-      { name: b"x-bin", value: raw },
+      { name: b"x-bin", value: raw, },
     ])
     assert_eq(reply.grpc_status, 0)
     let mut echoed = b""

@@ -140,7 +140,7 @@ pub struct HealthService {
 ///|
 /// A health service reporting the overall server as `SERVING`.
 pub fn HealthService::new() -> HealthService {
-  { statuses: Map([("", Serving)]) }
+  { statuses: Map([("", Serving)]), }
 }
 
 ///|

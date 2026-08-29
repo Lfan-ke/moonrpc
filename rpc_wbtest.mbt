@@ -63,6 +63,6 @@ test "gRPC status codes" {
 
 ///|
 test "method path" {
-  let m : Method = { service: "greet.Greeter", name: "SayHello" }
+  let m : Method = { service: "greet.Greeter", name: "SayHello", }
   assert_eq(m.path(), "/greet.Greeter/SayHello")
 }

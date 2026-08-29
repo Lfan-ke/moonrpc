@@ -177,6 +177,14 @@ pub fn H2Server::register(
 }
 
 ///|
+/// Drop everything the engine still holds for a finished stream. The map is only ever
+/// inserted into otherwise, so a long-lived connection would keep one full request and
+/// response per RPC it has ever served. An unknown id is a no-op.
+pub fn H2Server::release(self : H2Server, id : Int) -> Unit {
+  self.streams.remove(id)
+}
+
+///|
 /// Register a handler of any of the four gRPC call kinds.
 pub fn H2Server::register_handler(
   self : H2Server,
@@ -263,7 +271,7 @@ pub fn H2Server::goaway(self : H2Server, last_stream_id : Int) -> Array[Frame] {
 /// Latin-1 `Bytes` → `String`, one code unit per octet. HTTP/2 header names/values
 /// are byte strings; `:path` and `:method` are ASCII, so this is exact for them.
 fn bytes_to_ascii(b : Bytes) -> String {
-  let sb = StringBuilder::new()
+  let sb = StringBuilder()
   for i = 0; i < b.length(); i = i + 1 {
     sb.write_char(b[i].to_int().unsafe_to_char())
   }
@@ -817,11 +825,11 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
   if s.trailers_only {
     if !s.trailers_sent {
       let tr : Array[Header] = [
-        { name: b":status", value: b"200" },
-        { name: b"content-type", value: b"application/grpc" },
-        { name: b"grpc-accept-encoding", value: b"identity,gzip" },
-        { name: b"grpc-status", value: int_to_ascii_bytes(s.status_code) },
-        { name: b"grpc-message", value: percent_encode(s.status_message) },
+        { name: b":status", value: b"200", },
+        { name: b"content-type", value: b"application/grpc", },
+        { name: b"grpc-accept-encoding", value: b"identity,gzip", },
+        { name: b"grpc-status", value: int_to_ascii_bytes(s.status_code), },
+        { name: b"grpc-message", value: percent_encode(s.status_message), },
       ]
       if s.status_code != 0 {
         tr.push({
@@ -846,10 +854,10 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
   }
   if s.started_response && !s.headers_sent {
     let headers : Array[Header] = [
-      { name: b":status", value: b"200" },
-      { name: b"content-type", value: b"application/grpc" },
-      { name: b"grpc-encoding", value: b"identity" },
-      { name: b"grpc-accept-encoding", value: b"identity,gzip" },
+      { name: b":status", value: b"200", },
+      { name: b"content-type", value: b"application/grpc", },
+      { name: b"grpc-encoding", value: b"identity", },
+      { name: b"grpc-accept-encoding", value: b"identity,gzip", },
     ]
     for h in s.ctx.resp_headers {
       headers.push({
@@ -886,7 +894,7 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
     s.headers_sent &&
     !s.trailers_sent {
     let trailers : Array[Header] = [
-      { name: b"grpc-status", value: int_to_ascii_bytes(s.status_code) },
+      { name: b"grpc-status", value: int_to_ascii_bytes(s.status_code), },
     ]
     // A non-OK status that surfaced after the body already started rides the closing
     // trailers together with its message.
@@ -927,6 +935,15 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
     )
     s.state = s.state.on_send(Headers(end_stream=true))
     s.trailers_sent = true
+    // Trailers close the stream, so its buffers will not be read again. The entry
+    // itself stays — callers still ask a finished stream for its state — but a
+    // long-lived connection would otherwise hold one full request and response body
+    // per RPC it has ever served.
+    s.header_block.reset()
+    s.data.reset()
+    s.req_msgs.clear()
+    s.out = b""
+    s.out_off = 0
   }
   frames
 }
@@ -944,6 +961,27 @@ fn H2Server::pump_all(self : H2Server) -> Array[Frame] raise {
     }
   }
   frames
+}
+
+///|
+/// The highest client stream id this connection has opened, which is what a GOAWAY
+/// has to name so the peer knows which of its streams were accepted.
+pub fn H2Server::highest_stream(self : H2Server) -> Int {
+  self.last_client_stream
+}
+
+///|
+/// How many streams are still running. A graceful shutdown waits for this to reach
+/// zero before closing the connection; finished streams stay in the map with their
+/// state but are not counted.
+pub fn H2Server::active_streams(self : H2Server) -> Int {
+  let mut n = 0
+  for _id, s in self.streams {
+    if !(s.state is Closed) {
+      n = n + 1
+    }
+  }
+  n
 }
 
 ///|

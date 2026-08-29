@@ -94,7 +94,7 @@ pub(all) struct DynamicTable {
 /// A new empty dynamic table bounded by `max_size` octets (default 4096, the
 /// HTTP/2 initial `SETTINGS_HEADER_TABLE_SIZE`).
 pub fn DynamicTable::new(max_size? : Int = 4096) -> DynamicTable {
-  { entries: [], size: 0, max_size }
+  { entries: [], size: 0, max_size, }
 }
 
 ///|
@@ -193,7 +193,7 @@ pub(all) struct HpackDecoder {
 /// A new decoder whose dynamic table is bounded by `max_size` octets (also the
 /// hard cap enforced on dynamic table size updates).
 pub fn HpackDecoder::new(max_size? : Int = 4096) -> HpackDecoder {
-  { table: DynamicTable::new(max_size~), limit: max_size }
+  { table: DynamicTable::new(max_size~), limit: max_size, }
 }
 
 ///|
@@ -237,7 +237,7 @@ pub fn HpackDecoder::decode(
         raise HpackDecodeError("indexed header field with index 0")
       }
       match hpack_lookup(self.table, index) {
-        Some((name, value)) => out.push({ name, value })
+        Some((name, value)) => out.push({ name, value, })
         None =>
           raise HpackDecodeError("index out of range: " + index.to_string())
       }
@@ -250,7 +250,7 @@ pub fn HpackDecoder::decode(
       let (value, value_consumed) = hpack_read_string(block, off)
       off = off + value_consumed
       self.table.add(name, value)
-      out.push({ name, value })
+      out.push({ name, value, })
     } else if (b & 0x20) != 0 {
       // §6.3 Dynamic Table Size Update.
       let (new_max, consumed) = hpack_decode_int(block, off, 5)
@@ -269,7 +269,7 @@ pub fn HpackDecoder::decode(
       off = off + name_consumed
       let (value, value_consumed) = hpack_read_string(block, off)
       off = off + value_consumed
-      out.push({ name, value })
+      out.push({ name, value, })
     }
   }
   out
@@ -293,7 +293,7 @@ pub fn HpackEncoder::new(
   max_size? : Int = 4096,
   huffman? : Bool = true,
 ) -> HpackEncoder {
-  { table: DynamicTable::new(max_size~), huffman }
+  { table: DynamicTable::new(max_size~), huffman, }
 }
 
 ///|

@@ -64,7 +64,7 @@ fn bad(from : StreamState, dir : String, ev : StreamEvent) -> StreamError {
     RstStream => "RST_STREAM"
   }
   InvalidTransition(
-    dir + " " + name + " not allowed in state " + from.to_string(),
+    dir + " " + name + " not allowed in state " + Show::to_string(from),
   )
 }
 
@@ -165,7 +165,7 @@ pub(all) struct Stream {
 ///|
 /// A fresh idle stream with the given identifier.
 pub fn Stream::new(id : Int) -> Stream {
-  { id, state: Idle }
+  { id, state: Idle, }
 }
 
 ///|

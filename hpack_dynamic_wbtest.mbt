@@ -1,6 +1,6 @@
 ///|
 fn h(name : Bytes, value : Bytes) -> Header {
-  { name, value }
+  { name, value, }
 }
 
 ///|

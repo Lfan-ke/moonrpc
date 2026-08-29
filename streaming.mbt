@@ -85,7 +85,7 @@ pub fn RpcContext::add_header(
   name : Bytes,
   value : Bytes,
 ) -> Unit {
-  self.resp_headers.push({ name, value })
+  self.resp_headers.push({ name, value, })
 }
 
 ///|
@@ -96,7 +96,7 @@ pub fn RpcContext::add_trailer(
   name : Bytes,
   value : Bytes,
 ) -> Unit {
-  self.resp_trailers.push({ name, value })
+  self.resp_trailers.push({ name, value, })
 }
 
 ///|

@@ -1,0 +1,774 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "Lfan-ke/moonrpc"
+
+import {
+  "moonbitlang/core/buffer",
+  "moonbitlang/core/debug",
+}
+
+// Values
+pub fn base64_decode(Bytes) -> Bytes
+
+pub fn base64_encode(Bytes) -> Bytes
+
+pub let connection_preface : Bytes
+
+pub fn decode_file_descriptor_set(Bytes) -> Array[FileDescriptor] raise PbError
+
+pub fn decode_frame(Bytes, offset? : Int) -> (Frame, Int) raise FrameError
+
+pub fn decode_frame_header(Bytes, offset? : Int) -> FrameHeader raise FrameError
+
+pub fn decode_health_request(Bytes) -> Bytes
+
+pub fn decode_health_response(Bytes) -> ServingStatus
+
+pub fn decode_message(Bytes) -> (Bool, Bytes)?
+
+pub fn decode_reflection_request(Bytes) -> ReflectionRequest raise PbError
+
+pub fn decode_reflection_response(Bytes) -> ReflectionResponse raise PbError
+
+pub let default_max_frame_size : Int
+
+pub let default_window_size : Int
+
+pub fn dns_decode_response(Bytes) -> DnsResponse
+
+pub fn dns_encode_query(Int, String, Int) -> Bytes
+
+pub let dns_type_a : Int
+
+pub let dns_type_aaaa : Int
+
+pub fn encode_file_descriptor_set(Array[FileDescriptor]) -> Bytes
+
+pub fn encode_grpc_timeout(Int) -> Bytes
+
+pub fn encode_health_request(Bytes) -> Bytes
+
+pub fn encode_health_response(ServingStatus) -> Bytes
+
+pub fn encode_message(Bytes, compressed? : Bool) -> Bytes
+
+pub fn encode_reflection_request(ReflectionRequest) -> Bytes
+
+pub let error_cancel : Int
+
+pub let error_compression_error : Int
+
+pub let error_connect_error : Int
+
+pub let error_enhance_your_calm : Int
+
+pub let error_flow_control_error : Int
+
+pub let error_frame_size_error : Int
+
+pub let error_http_1_1_required : Int
+
+pub let error_inadequate_security : Int
+
+pub let error_internal_error : Int
+
+pub let error_no_error : Int
+
+pub let error_protocol_error : Int
+
+pub let error_refused_stream : Int
+
+pub let error_settings_timeout : Int
+
+pub let error_stream_closed : Int
+
+pub let flag_ack : Int
+
+pub let flag_end_headers : Int
+
+pub let flag_end_stream : Int
+
+pub let flag_padded : Int
+
+pub let flag_priority : Int
+
+pub let frame_continuation : Int
+
+pub let frame_data : Int
+
+pub let frame_goaway : Int
+
+pub let frame_headers : Int
+
+pub let frame_ping : Int
+
+pub let frame_priority : Int
+
+pub let frame_push_promise : Int
+
+pub let frame_rst_stream : Int
+
+pub let frame_settings : Int
+
+pub let frame_window_update : Int
+
+pub fn gunzip(Bytes) -> Bytes raise GzError
+
+pub fn has_connection_preface(Bytes) -> Bool
+
+pub let health_check_path : String
+
+pub let health_watch_path : String
+
+pub fn hpack_decode_int(Bytes, Int, Int) -> (Int, Int) raise HpackError
+
+pub fn hpack_decode_string(Bytes, Int) -> (Bytes, Int) raise HpackError
+
+pub fn hpack_encode_int(Int, Int) -> Bytes
+
+pub fn hpack_encode_size_update(Int) -> Bytes
+
+pub fn hpack_encode_string(Bytes) -> Bytes
+
+pub fn hpack_encode_string_auto(Bytes) -> Bytes
+
+pub fn hpack_encode_string_huffman(Bytes) -> Bytes
+
+pub fn hpack_read_string(Bytes, Int) -> (Bytes, Int) raise HpackError
+
+pub fn hpack_static_entry(Int) -> (String, String)?
+
+pub fn hpack_static_table() -> Array[(String, String)]
+
+pub fn hpack_string_is_huffman(Bytes, Int) -> Bool
+
+pub fn huffman_decode(Bytes) -> Bytes raise HpackError
+
+pub fn huffman_encode(Bytes) -> Bytes
+
+pub fn huffman_encoded_length(Bytes) -> Int
+
+pub fn is_binary_metadata(Bytes) -> Bool
+
+pub let max_header_list_size : Int
+
+pub let max_message_size : Int
+
+pub fn metadata_value_from_wire(Bytes, Bytes) -> Bytes
+
+pub fn metadata_value_to_wire(Bytes, Bytes) -> Bytes
+
+pub fn parse_grpc_timeout(Bytes) -> Int?
+
+pub fn percent_decode(Bytes) -> String
+
+pub let reflection_v1_path : String
+
+pub let reflection_v1alpha_path : String
+
+pub let settings_enable_push : Int
+
+pub let settings_header_table_size : Int
+
+pub let settings_initial_window_size : Int
+
+pub let settings_max_concurrent_streams : Int
+
+pub let settings_max_frame_size : Int
+
+pub let settings_max_header_list_size : Int
+
+pub fn stream_id_valid_for_initiator(Int, by_client~ : Bool) -> Bool
+
+pub fn stream_is_client_initiated(Int) -> Bool
+
+pub fn stream_is_server_initiated(Int) -> Bool
+
+// Errors
+pub suberror FrameError {
+  Incomplete
+  FrameSizeError(String)
+  ProtocolError(String)
+} derive(Eq)
+pub impl Show for FrameError
+
+pub suberror GzError {
+  GzError(String)
+}
+
+pub suberror HpackError {
+  HuffmanError(String)
+  HpackDecodeError(String)
+} derive(Eq)
+pub impl Show for HpackError
+
+pub suberror PbError {
+  Truncated
+  BadWireType(Int)
+  Overflow
+  BadUtf8
+} derive(Eq)
+pub impl Show for PbError
+
+pub suberror StreamError {
+  InvalidTransition(String)
+} derive(Eq)
+pub impl Show for StreamError
+
+// Types and methods
+pub(all) struct BidiHandler {
+  on_message : (Bytes) -> Array[Bytes]
+  on_end : () -> Array[Bytes]
+}
+
+pub(all) struct CallReply {
+  status : Bytes
+  grpc_status : Int
+  grpc_message : String
+  headers : Array[Header]
+  messages : Array[Bytes]
+  trailers : Array[Header]
+}
+
+pub(all) struct ClientCall {
+  id : Int
+  path : Bytes
+  authority : Bytes
+  metadata : Array[Header]
+  timeout : Bytes?
+  mut out : Bytes
+  mut out_off : Int
+  mut req_ended : Bool
+  mut req_headers_sent : Bool
+  mut req_fin_sent : Bool
+  mut send_window : Int
+  data : @buffer.Buffer
+  mut data_off : Int
+  mut messages : Array[Bytes]
+  mut recv_window : Int
+  mut status : Bytes
+  mut grpc_status : Int?
+  mut grpc_message : String
+  mut resp_encoding : Bytes
+  resp_headers : Array[Header]
+  resp_trailers : Array[Header]
+  mut headers_seen : Bool
+  header_block : @buffer.Buffer
+  mut in_headers : Bool
+  mut pending_end_stream : Bool
+  mut decode_failed : Bool
+  mut retryable : Bool
+  mut done : Bool
+}
+
+pub struct ConnectionPool {
+  order : Array[String]
+  subconns : Map[String, SubConn]
+  policy : LbPolicy
+  mut cursor : Int
+}
+pub fn ConnectionPool::new(Array[String], policy? : LbPolicy) -> Self
+pub fn ConnectionPool::pick(Self) -> String?
+pub fn ConnectionPool::ready_addresses(Self) -> Array[String]
+pub fn ConnectionPool::subconn(Self, String) -> SubConn?
+
+pub(all) enum ConnectivityState {
+  Idle
+  Connecting
+  Ready
+  TransientFailure
+  Shutdown
+} derive(Eq, @debug.Debug)
+
+pub(all) struct DnsRecord {
+  name : String
+  rtype : Int
+  ttl : Int
+  address : String
+} derive(Eq, @debug.Debug)
+
+pub(all) struct DnsResponse {
+  id : Int
+  rcode : Int
+  answers : Array[DnsRecord]
+} derive(Eq, @debug.Debug)
+pub fn DnsResponse::addresses(Self) -> Array[String]
+
+pub(all) struct DynamicTable {
+  mut entries : Array[(Bytes, Bytes)]
+  mut size : Int
+  mut max_size : Int
+}
+pub fn DynamicTable::add(Self, Bytes, Bytes) -> Unit
+pub fn DynamicTable::count(Self) -> Int
+pub fn DynamicTable::current_size(Self) -> Int
+pub fn DynamicTable::new(max_size? : Int) -> Self
+pub fn DynamicTable::set_max_size(Self, Int) -> Unit
+
+pub(all) struct FieldDescriptor {
+  name : String
+  number : Int
+  label : FieldLabel
+  type_ : FieldType
+  type_name : String
+} derive(Eq)
+pub fn FieldDescriptor::decode(Bytes) -> Self raise PbError
+pub fn FieldDescriptor::encode(Self) -> Bytes
+pub fn FieldDescriptor::scalar(String, Int, FieldType, label? : FieldLabel) -> Self
+
+pub(all) enum FieldLabel {
+  LabelOptional
+  LabelRequired
+  LabelRepeated
+} derive(Eq)
+pub fn FieldLabel::code(Self) -> Int
+pub fn FieldLabel::from_code(Int) -> Self
+
+pub(all) enum FieldType {
+  TypeDouble
+  TypeFloat
+  TypeInt64
+  TypeUint64
+  TypeInt32
+  TypeFixed64
+  TypeFixed32
+  TypeBool
+  TypeString
+  TypeMessage
+  TypeBytes
+  TypeUint32
+  TypeEnum
+  TypeSfixed32
+  TypeSfixed64
+  TypeSint32
+  TypeSint64
+} derive(Eq)
+pub fn FieldType::code(Self) -> Int
+pub fn FieldType::from_code(Int) -> Self
+
+pub(all) struct FileDescriptor {
+  name : String
+  package_ : String
+  messages : Array[MessageDescriptor]
+  services : Array[ServiceDescriptor]
+  syntax : String
+} derive(Eq)
+pub fn FileDescriptor::decode(Bytes) -> Self raise PbError
+pub fn FileDescriptor::encode(Self) -> Bytes
+pub fn FileDescriptor::new(String, String, messages? : Array[MessageDescriptor], services? : Array[ServiceDescriptor]) -> Self
+pub fn FileDescriptor::service_names(Self) -> Array[String]
+pub fn FileDescriptor::symbols(Self) -> Array[String]
+
+pub(all) enum Frame {
+  Data(stream_id~ : Int, data~ : Bytes, end_stream~ : Bool, padding~ : Int)
+  Headers(stream_id~ : Int, fragment~ : Bytes, end_stream~ : Bool, end_headers~ : Bool, priority~ : Priority?, padding~ : Int)
+  Priority(stream_id~ : Int, priority~ : Priority)
+  RstStream(stream_id~ : Int, error_code~ : Int)
+  Settings(params~ : Array[(Int, Int)], ack~ : Bool)
+  PushPromise(stream_id~ : Int, promised_id~ : Int, fragment~ : Bytes, end_headers~ : Bool, padding~ : Int)
+  Ping(payload~ : Bytes, ack~ : Bool)
+  GoAway(last_stream_id~ : Int, error_code~ : Int, debug~ : Bytes)
+  WindowUpdate(stream_id~ : Int, increment~ : Int)
+  Continuation(stream_id~ : Int, fragment~ : Bytes, end_headers~ : Bool)
+  Unknown(ftype~ : Int, flags~ : Int, stream_id~ : Int, payload~ : Bytes)
+} derive(Eq)
+pub fn Frame::encode(Self) -> Bytes
+pub fn Frame::frame_type(Self) -> Int
+
+pub(all) struct FrameHeader {
+  length : Int
+  ftype : Int
+  flags : Int
+  stream_id : Int
+} derive(Eq)
+pub fn FrameHeader::encode(Self) -> Bytes
+
+pub struct H2Client {
+  encoder : HpackEncoder
+  decoder : HpackDecoder
+  calls : Map[Int, ClientCall]
+  mut next_id : Int
+  mut conn_send_window : Int
+  mut conn_recv_window : Int
+  mut remote_initial_window : Int
+  mut remote_max_frame : Int
+  mut goaway_received : Bool
+  mut goaway_last_stream_id : Int
+}
+pub fn H2Client::close_send(Self, Int) -> Array[Frame]
+pub fn H2Client::feed(Self, Frame) -> Array[Frame] raise
+pub fn H2Client::goaway_last_stream_id(Self) -> Int
+pub fn H2Client::goaway_received(Self) -> Bool
+pub fn H2Client::has_messages(Self, Int) -> Bool
+pub fn H2Client::is_done(Self, Int) -> Bool
+pub fn H2Client::is_retryable(Self, Int) -> Bool
+pub fn H2Client::new() -> Self
+pub fn H2Client::open(Self, String, metadata? : Array[Header], authority? : String, timeout_millis? : Int?) -> Int
+pub fn H2Client::preface(Self) -> Array[Frame]
+pub fn H2Client::release(Self, Int) -> Unit
+pub fn H2Client::reply(Self, Int) -> CallReply
+pub fn H2Client::send(Self, Int, Bytes, end? : Bool) -> Array[Frame]
+pub fn H2Client::take_messages(Self, Int) -> Array[Bytes]
+pub fn H2Client::unary(Self, String, Bytes, metadata? : Array[Header], authority? : String, timeout_millis? : Int?) -> (Int, Array[Frame])
+
+pub struct H2Server {
+  handlers : Map[String, Handler]
+  encoder : HpackEncoder
+  decoder : HpackDecoder
+  streams : Map[Int, SrvStream]
+  unary_interceptors : Array[(RpcContext, Bytes, (RpcContext, Bytes) -> Bytes) -> Bytes]
+  stream_interceptors : Array[(RpcContext, Bytes, (RpcContext, Bytes) -> Array[Bytes]) -> Array[Bytes]]
+  mut conn_recv_window : Int
+  mut conn_send_window : Int
+  mut remote_initial_window : Int
+  mut remote_max_frame : Int
+  mut goaway_received : Bool
+  mut last_client_stream : Int
+}
+pub fn H2Server::active_streams(Self) -> Int
+pub fn H2Server::add_stream_interceptor(Self, (RpcContext, Bytes, (RpcContext, Bytes) -> Array[Bytes]) -> Array[Bytes]) -> Unit
+pub fn H2Server::add_unary_interceptor(Self, (RpcContext, Bytes, (RpcContext, Bytes) -> Bytes) -> Bytes) -> Unit
+pub fn H2Server::feed(Self, Frame) -> Array[Frame] raise
+pub fn H2Server::goaway(Self, Int) -> Array[Frame]
+pub fn H2Server::goaway_received(Self) -> Bool
+pub fn H2Server::highest_stream(Self) -> Int
+pub fn H2Server::new() -> Self
+pub fn H2Server::preface(Self) -> Array[Frame]
+pub fn H2Server::register(Self, String, (Bytes) -> Bytes) -> Unit
+pub fn H2Server::register_bidi(Self, String, (RpcContext) -> BidiHandler) -> Unit
+pub fn H2Server::register_client_streaming(Self, String, (RpcContext, Array[Bytes]) -> Bytes) -> Unit
+pub fn H2Server::register_handler(Self, String, Handler) -> Unit
+pub fn H2Server::register_server_streaming(Self, String, (RpcContext, Bytes) -> Array[Bytes]) -> Unit
+pub fn H2Server::register_unary(Self, String, (RpcContext, Bytes) -> Bytes) -> Unit
+pub fn H2Server::release(Self, Int) -> Unit
+pub fn H2Server::stream_state(Self, Int) -> StreamState
+
+pub(all) enum Handler {
+  Unary((RpcContext, Bytes) -> Bytes)
+  ServerStreaming((RpcContext, Bytes) -> Array[Bytes])
+  ClientStreaming((RpcContext, Array[Bytes]) -> Bytes)
+  Bidi((RpcContext) -> BidiHandler)
+}
+
+pub(all) struct Header {
+  name : Bytes
+  value : Bytes
+} derive(Eq, @debug.Debug)
+
+pub struct HealthService {
+  statuses : Map[String, ServingStatus]
+}
+pub fn HealthService::check(Self, String) -> ServingStatus
+pub fn HealthService::handlers(Self) -> Array[(String, Handler)]
+pub fn HealthService::install(Self, H2Server) -> Unit
+pub fn HealthService::new() -> Self
+pub fn HealthService::set_status(Self, String, ServingStatus) -> Unit
+
+pub(all) struct HedgingPolicy {
+  max_attempts : Int
+  hedging_delay_millis : Int
+  non_fatal : Array[Int]
+}
+pub fn HedgingPolicy::attempt_cap(Self) -> Int
+pub fn HedgingPolicy::can_start_another(Self, Int) -> Bool
+pub fn HedgingPolicy::default() -> Self
+pub fn HedgingPolicy::delay_millis(Self) -> Int
+pub fn HedgingPolicy::should_commit(Self, Int) -> Bool
+
+pub(all) struct HpackDecoder {
+  table : DynamicTable
+  limit : Int
+}
+pub fn HpackDecoder::decode(Self, Bytes) -> Array[Header] raise HpackError
+pub fn HpackDecoder::new(max_size? : Int) -> Self
+
+pub(all) struct HpackEncoder {
+  table : DynamicTable
+  mut huffman : Bool
+}
+pub fn HpackEncoder::encode(Self, Array[Header]) -> Bytes
+pub fn HpackEncoder::new(max_size? : Int, huffman? : Bool) -> Self
+
+pub struct Keepalive {
+  keepalive_time : Int64
+  keepalive_timeout : Int64
+  mut last_activity : Int64
+  mut ping_outstanding : Bool
+  mut ping_sent_at : Int64
+}
+pub fn Keepalive::is_timed_out(Self, Int64) -> Bool
+pub fn Keepalive::new(keepalive_time~ : Int64, keepalive_timeout~ : Int64, now? : Int64) -> Self
+pub fn Keepalive::on_activity(Self, Int64) -> Unit
+pub fn Keepalive::on_ping_ack(Self, Int64) -> Unit
+pub fn Keepalive::on_ping_sent(Self, Int64) -> Unit
+pub fn Keepalive::should_ping(Self, Int64) -> Bool
+
+pub(all) enum LbPolicy {
+  PickFirst
+  RoundRobin
+} derive(Eq, @debug.Debug)
+
+pub struct LoadBalancer {
+  addresses : Array[String]
+  policy : LbPolicy
+  mut cursor : Int
+}
+pub fn LoadBalancer::new(Array[String], policy? : LbPolicy) -> Self
+pub fn LoadBalancer::pick(Self) -> String?
+pub fn LoadBalancer::size(Self) -> Int
+
+pub(all) struct MessageDescriptor {
+  name : String
+  fields : Array[FieldDescriptor]
+} derive(Eq)
+pub fn MessageDescriptor::decode(Bytes) -> Self raise PbError
+pub fn MessageDescriptor::encode(Self) -> Bytes
+
+pub(all) struct Method {
+  service : String
+  name : String
+}
+pub fn Method::path(Self) -> String
+
+pub(all) struct MethodDescriptor {
+  name : String
+  input_type : String
+  output_type : String
+  client_streaming : Bool
+  server_streaming : Bool
+} derive(Eq)
+pub fn MethodDescriptor::decode(Bytes) -> Self raise PbError
+pub fn MethodDescriptor::encode(Self) -> Bytes
+
+pub struct PbReader {
+  data : Bytes
+  mut pos : Int
+}
+pub fn PbReader::eof(Self) -> Bool
+pub fn PbReader::new(Bytes) -> Self
+pub fn PbReader::read_bool(Self) -> Bool raise PbError
+pub fn PbReader::read_bytes(Self) -> Bytes raise PbError
+pub fn PbReader::read_fixed32(Self) -> UInt raise PbError
+pub fn PbReader::read_fixed64(Self) -> UInt64 raise PbError
+pub fn PbReader::read_int32(Self) -> Int raise PbError
+pub fn PbReader::read_int64(Self) -> Int64 raise PbError
+pub fn PbReader::read_len_delim(Self) -> Bytes raise PbError
+pub fn PbReader::read_map_string_string(Self) -> (String, String) raise PbError
+pub fn PbReader::read_packed_int32(Self) -> Array[Int] raise PbError
+pub fn PbReader::read_sint32(Self) -> Int raise PbError
+pub fn PbReader::read_sint64(Self) -> Int64 raise PbError
+pub fn PbReader::read_string(Self) -> String raise PbError
+pub fn PbReader::read_tag(Self) -> (Int, WireType) raise PbError
+pub fn PbReader::read_uint32(Self) -> UInt raise PbError
+pub fn PbReader::read_uint64(Self) -> UInt64 raise PbError
+pub fn PbReader::read_varint(Self) -> UInt64 raise PbError
+pub fn PbReader::skip(Self, WireType) -> Unit raise PbError
+
+pub struct PbWriter {
+  buf : @buffer.Buffer
+}
+pub fn PbWriter::bool_(Self, Int, Bool) -> Unit
+pub fn PbWriter::bytes_(Self, Int, Bytes) -> Unit
+pub fn PbWriter::enum_(Self, Int, Int) -> Unit
+pub fn PbWriter::fixed32(Self, Int, UInt) -> Unit
+pub fn PbWriter::fixed64(Self, Int, UInt64) -> Unit
+pub fn PbWriter::int32(Self, Int, Int) -> Unit
+pub fn PbWriter::int64(Self, Int, Int64) -> Unit
+pub fn PbWriter::map_string_string(Self, Int, String, String) -> Unit
+pub fn PbWriter::message_(Self, Int, Bytes) -> Unit
+pub fn PbWriter::new() -> Self
+pub fn PbWriter::packed_int32(Self, Int, Array[Int]) -> Unit
+pub fn PbWriter::sint32(Self, Int, Int) -> Unit
+pub fn PbWriter::sint64(Self, Int, Int64) -> Unit
+pub fn PbWriter::string_(Self, Int, String) -> Unit
+pub fn PbWriter::to_bytes(Self) -> Bytes
+pub fn PbWriter::uint32(Self, Int, UInt) -> Unit
+pub fn PbWriter::uint64(Self, Int, UInt64) -> Unit
+pub fn PbWriter::write_fixed32(Self, UInt) -> Unit
+pub fn PbWriter::write_fixed64(Self, UInt64) -> Unit
+pub fn PbWriter::write_len_delim(Self, Bytes) -> Unit
+pub fn PbWriter::write_tag(Self, Int, WireType) -> Unit
+pub fn PbWriter::write_varint(Self, UInt64) -> Unit
+
+pub(all) struct Priority {
+  exclusive : Bool
+  stream_dependency : Int
+  weight : Int
+} derive(Eq)
+
+pub(all) enum ReflectionRequest {
+  ListServices(String)
+  FileByFilename(String)
+  FileContainingSymbol(String)
+  Unsupported
+} derive(Eq)
+
+pub(all) enum ReflectionResponse {
+  ServiceList(Array[String])
+  FileDescriptors(Array[Bytes])
+  ReflectionError(Int, String)
+} derive(Eq)
+
+pub struct ReflectionService {
+  files : Array[FileDescriptor]
+  by_symbol : Map[String, Int]
+  by_filename : Map[String, Int]
+  services : Array[String]
+}
+pub fn ReflectionService::add_file(Self, FileDescriptor) -> Unit
+pub fn ReflectionService::handle(Self, Bytes) -> Bytes
+pub fn ReflectionService::handler(Self) -> Handler
+pub fn ReflectionService::install(Self, H2Server) -> Unit
+pub fn ReflectionService::new() -> Self
+
+pub(all) struct RetryPolicy {
+  max_attempts : Int
+  initial_backoff_millis : Int
+  max_backoff_millis : Int
+  backoff_multiplier : Double
+  retryable : Array[Int]
+}
+pub fn RetryPolicy::backoff_millis(Self, Int) -> Int
+pub fn RetryPolicy::default() -> Self
+pub fn RetryPolicy::should_retry(Self, Int, Int) -> Bool
+
+pub(all) struct RpcContext {
+  path : String
+  metadata : Array[Header]
+  deadline_millis : Int?
+  resp_headers : Array[Header]
+  resp_trailers : Array[Header]
+  mut status_fail : (Int, String)?
+  error_details : Array[Bytes]
+}
+pub fn RpcContext::add_error_detail(Self, Bytes) -> Unit
+pub fn RpcContext::add_header(Self, Bytes, Bytes) -> Unit
+pub fn RpcContext::add_trailer(Self, Bytes, Bytes) -> Unit
+pub fn RpcContext::empty() -> Self
+pub fn RpcContext::fail(Self, Int, String) -> Unit
+pub fn RpcContext::metadata_get(Self, Bytes) -> Bytes?
+
+pub(all) struct ServiceDescriptor {
+  name : String
+  methods : Array[MethodDescriptor]
+} derive(Eq)
+pub fn ServiceDescriptor::decode(Bytes) -> Self raise PbError
+pub fn ServiceDescriptor::encode(Self) -> Bytes
+
+pub(all) enum ServingStatus {
+  StatusUnknown
+  Serving
+  NotServing
+  ServiceUnknown
+} derive(Eq)
+pub fn ServingStatus::code(Self) -> Int
+pub fn ServingStatus::from_code(Int) -> Self
+
+pub(all) struct SrvStream {
+  id : Int
+  mut state : StreamState
+  header_block : @buffer.Buffer
+  data : @buffer.Buffer
+  mut req_off : Int
+  req_msgs : Array[Bytes]
+  mut bidi_processed : Int
+  mut headers_complete : Bool
+  mut end_stream_recv : Bool
+  mut path : String
+  mut ctx : RpcContext
+  mut recv_window : Int
+  mut send_window : Int
+  mut out : Bytes
+  mut out_off : Int
+  mut started : Bool
+  mut started_response : Bool
+  mut response_ended : Bool
+  mut finalized : Bool
+  mut trailers_only : Bool
+  mut status_code : Int
+  mut status_message : String
+  mut req_encoding : Bytes
+  mut compressed_unsupported : Bool
+  mut oversize : Bool
+  mut headers_sent : Bool
+  mut trailers_sent : Bool
+  mut bidi : BidiHandler?
+}
+
+pub(all) enum Status {
+  Ok
+  Cancelled
+  Unknown
+  InvalidArgument
+  DeadlineExceeded
+  NotFound
+  AlreadyExists
+  PermissionDenied
+  ResourceExhausted
+  FailedPrecondition
+  Aborted
+  OutOfRange
+  Unimplemented
+  Internal
+  Unavailable
+  DataLoss
+  Unauthenticated
+} derive(Eq)
+pub fn Status::code(Self) -> Int
+pub fn Status::name(Self) -> String
+
+pub(all) struct Stream {
+  id : Int
+  mut state : StreamState
+}
+pub fn Stream::new(Int) -> Self
+pub fn Stream::recv(Self, StreamEvent) -> StreamState raise StreamError
+pub fn Stream::send(Self, StreamEvent) -> StreamState raise StreamError
+
+pub(all) enum StreamEvent {
+  Headers(end_stream~ : Bool)
+  Data(end_stream~ : Bool)
+  Reserve
+  RstStream
+} derive(Eq)
+
+pub(all) enum StreamState {
+  Idle
+  ReservedLocal
+  ReservedRemote
+  Open
+  HalfClosedLocal
+  HalfClosedRemote
+  Closed
+} derive(Eq, @debug.Debug)
+pub fn StreamState::on_recv(Self, StreamEvent) -> Self raise StreamError
+pub fn StreamState::on_send(Self, StreamEvent) -> Self raise StreamError
+pub impl Show for StreamState
+
+pub struct SubConn {
+  address : String
+  mut state : ConnectivityState
+}
+pub fn SubConn::connect(Self) -> Unit
+pub fn SubConn::is_ready(Self) -> Bool
+pub fn SubConn::new(String) -> Self
+pub fn SubConn::on_connected(Self) -> Unit
+pub fn SubConn::on_failure(Self) -> Unit
+pub fn SubConn::on_idle(Self) -> Unit
+pub fn SubConn::shutdown(Self) -> Unit
+
+pub(all) enum WireType {
+  Varint
+  Fixed64
+  LengthDelim
+  Fixed32
+} derive(Eq)
+pub fn WireType::code(Self) -> Int
+pub fn WireType::from_code(Int) -> Self?
+pub impl Show for WireType
+
+// Type aliases
+pub type StreamInterceptor = (RpcContext, Bytes, (RpcContext, Bytes) -> Array[Bytes]) -> Array[Bytes]
+
+pub type UnaryInterceptor = (RpcContext, Bytes, (RpcContext, Bytes) -> Bytes) -> Bytes
+
+// Traits

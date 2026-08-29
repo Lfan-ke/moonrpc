@@ -11,7 +11,7 @@ fn hex(bs : Bytes) -> String {
   let digits = [
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
   ]
-  let buf = StringBuilder::new()
+  let buf = StringBuilder()
   for b in bs {
     let v = b.to_int() & 0xFF
     buf.write_char(digits[v >> 4])
@@ -100,10 +100,10 @@ fn run() -> Unit raise {
   // in a HEADERS frame, decoded back to the same fields.
   let enc = @moonrpc.HpackEncoder::new(huffman=true)
   let headers : Array[@moonrpc.Header] = [
-    { name: b":method", value: b"POST" },
-    { name: b":path", value: b"/greet.Greeter/SayHello" },
-    { name: b":authority", value: b"www.example.com" },
-    { name: b"content-type", value: b"application/grpc+proto" },
+    { name: b":method", value: b"POST", },
+    { name: b":path", value: b"/greet.Greeter/SayHello", },
+    { name: b":authority", value: b"www.example.com", },
+    { name: b"content-type", value: b"application/grpc+proto", },
   ]
   let block = enc.encode(headers)
   let dec = @moonrpc.HpackDecoder::new()

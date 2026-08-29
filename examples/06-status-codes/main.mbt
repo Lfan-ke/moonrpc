@@ -42,7 +42,10 @@ fn main {
 
   // A `Method` is `package.Service` + method name; `path()` is the `:path` header the
   // call rides on.
-  let greeter : @moonrpc.Method = { service: "greet.Greeter", name: "SayHello" }
+  let greeter : @moonrpc.Method = {
+    service: "greet.Greeter",
+    name: "SayHello",
+  }
   let health : @moonrpc.Method = {
     service: "grpc.health.v1.Health",
     name: "Check",

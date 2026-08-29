@@ -31,7 +31,7 @@ fn unhex(s : String) -> Bytes {
 
 ///|
 fn ascii(bs : Bytes) -> String {
-  let buf = StringBuilder::new()
+  let buf = StringBuilder()
   for b in bs {
     buf.write_char((b.to_int() & 0xFF).unsafe_to_char())
   }
@@ -61,9 +61,9 @@ fn run() -> Unit raise {
   let _ = client.feed(Settings(params=[], ack=false))
   let enc = @moonrpc.HpackEncoder::new()
   let hblock = enc.encode([
-    { name: b":status", value: b"200" },
-    { name: b"content-type", value: b"application/grpc" },
-    { name: b"grpc-encoding", value: b"gzip" },
+    { name: b":status", value: b"200", },
+    { name: b"content-type", value: b"application/grpc", },
+    { name: b"grpc-encoding", value: b"gzip", },
   ])
   let _ = client.feed(
     Headers(
@@ -83,7 +83,7 @@ fn run() -> Unit raise {
       padding=0,
     ),
   )
-  let tblock = enc.encode([{ name: b"grpc-status", value: b"0" }])
+  let tblock = enc.encode([{ name: b"grpc-status", value: b"0", }])
   let _ = client.feed(
     Headers(
       stream_id=id,

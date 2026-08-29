@@ -106,7 +106,7 @@ test "FileDescriptor: symbols and service names" {
 test "FileDescriptorSet: multiple files round-trip" {
   let a = greet_file()
   let b = FileDescriptor::new("health.proto", "grpc.health.v1", services=[
-    ServiceDescriptor::{ name: "Health", methods: [] },
+    ServiceDescriptor::{ name: "Health", methods: [], },
   ])
   let set = encode_file_descriptor_set([a, b])
   let back = decode_file_descriptor_set(set)

@@ -50,7 +50,7 @@ pub async fn ManagedChannel::connect(
       _ => sc.on_failure()
     }
   }
-  { pool, channels }
+  { pool, channels, }
 }
 
 ///|
@@ -75,6 +75,29 @@ pub async fn ManagedChannel::dns_connect(
 fn ManagedChannel::pick(self : ManagedChannel) -> Channel? {
   guard self.pool.pick() is Some(address) else { return None }
   self.channels.get(address)
+}
+
+///|
+/// A READY backend that no in-flight attempt has claimed yet, together with its address.
+/// Hedging needs this because a `Channel` drives one call at a time: two attempts sharing
+/// one channel would read the same socket concurrently, which aborts the event loop.
+fn ManagedChannel::pick_unused(
+  self : ManagedChannel,
+  claimed : Array[String],
+) -> (String, Channel)? {
+  for address in self.pool.ready_addresses() {
+    let mut taken = false
+    for c in claimed {
+      if c == address {
+        taken = true
+        break
+      }
+    }
+    if !taken && self.channels.get(address) is Some(ch) {
+      return Some((address, ch))
+    }
+  }
+  None
 }
 
 ///|
@@ -114,20 +137,21 @@ pub async fn ManagedChannel::unary_hedged(
 ) -> @moonrpc.CallReply {
   @async.with_task_group(g => {
     let tasks : Array[@async.Task[@moonrpc.CallReply]] = []
+    let claimed : Array[String] = []
     let mut started = 0
     while hedging.can_start_another(started) {
+      // Each attempt needs a backend no other in-flight attempt holds. Hedging is
+      // there to route around one slow backend, so a second attempt on the same
+      // channel would buy nothing even if the channel allowed it.
+      guard self.pick_unused(claimed) is Some((address, ch)) else { break }
+      claimed.push(address)
       started = started + 1
       let t = g.spawn(() => {
-        match self.pick() {
-          None => unavailable_reply()
-          Some(ch) => {
-            let reply = ch.unary(path, request, metadata~, timeout_millis~)
-            if hedging.should_commit(reply.grpc_status) {
-              g.return_immediately(reply)
-            }
-            reply
-          }
+        let reply = ch.unary(path, request, metadata~, timeout_millis~)
+        if hedging.should_commit(reply.grpc_status) {
+          g.return_immediately(reply)
         }
+        reply
       })
       tasks.push(t)
       if hedging.can_start_another(started) && hedging.delay_millis() > 0 {

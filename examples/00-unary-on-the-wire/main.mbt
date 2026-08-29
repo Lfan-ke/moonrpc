@@ -29,19 +29,19 @@ fn hello_request(name : String) -> Bytes {
 /// type, and `te: trailers`.
 fn request_headers(rpc : @moonrpc.Method) -> Array[@moonrpc.Header] {
   [
-    { name: b":method", value: b"POST" },
-    { name: b":scheme", value: b"http" },
-    { name: b":path", value: ascii(rpc.path()) },
-    { name: b":authority", value: b"127.0.0.1:50051" },
-    { name: b"content-type", value: b"application/grpc+proto" },
-    { name: b"te", value: b"trailers" },
+    { name: b":method", value: b"POST", },
+    { name: b":scheme", value: b"http", },
+    { name: b":path", value: ascii(rpc.path()), },
+    { name: b":authority", value: b"127.0.0.1:50051", },
+    { name: b"content-type", value: b"application/grpc+proto", },
+    { name: b"te", value: b"trailers", },
   ]
 }
 
 ///|
 #coverage.skip
 fn main {
-  let rpc = @moonrpc.Method::{ service: "greet.Greeter", name: "SayHello" }
+  let rpc = @moonrpc.Method::{ service: "greet.Greeter", name: "SayHello", }
   let headers = request_headers(rpc)
   let block = @moonrpc.HpackEncoder::new().encode(headers)
   let msg = @moonrpc.encode_message(hello_request("heke1228"))

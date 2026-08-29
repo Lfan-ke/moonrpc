@@ -57,7 +57,7 @@ priv struct GzBits {
 
 ///|
 fn GzBits::new(data : Bytes, start : Int) -> GzBits {
-  { data, pos: start, acc: 0, nbits: 0 }
+  { data, pos: start, acc: 0, nbits: 0, }
 }
 
 ///|
@@ -134,7 +134,7 @@ fn GzHuff::build(lengths : Array[Int], n : Int) -> GzHuff raise GzError {
       offsets[lengths[sym]] += 1
     }
   }
-  { counts, symbols }
+  { counts, symbols, }
 }
 
 ///|

@@ -62,7 +62,7 @@ fn all_done(client : @moonrpc.H2Client, ids : Array[Int]) -> Bool {
 
 ///|
 fn ascii(bs : Bytes) -> String {
-  let buf = StringBuilder::new()
+  let buf = StringBuilder()
   for b in bs {
     buf.write_char((b.to_int() & 0xFF).unsafe_to_char())
   }

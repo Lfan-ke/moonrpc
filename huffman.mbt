@@ -298,7 +298,7 @@ priv struct HNode {
 ///|
 /// Build the prefix-code decoding trie once from `huffman_table`.
 fn build_huffman_trie() -> Array[HNode] {
-  let nodes : Array[HNode] = [{ zero: -1, one: -1, sym: -1 }]
+  let nodes : Array[HNode] = [{ zero: -1, one: -1, sym: -1, }]
   for sym = 0; sym < huffman_table.length(); sym = sym + 1 {
     let (code, bits) = huffman_table[sym]
     let mut cur = 0
@@ -306,7 +306,7 @@ fn build_huffman_trie() -> Array[HNode] {
       let bit = (code >> i) & 1
       let next = if bit == 0 { nodes[cur].zero } else { nodes[cur].one }
       let child = if next == -1 {
-        nodes.push({ zero: -1, one: -1, sym: -1 })
+        nodes.push({ zero: -1, one: -1, sym: -1, })
         let idx = nodes.length() - 1
         if bit == 0 {
           nodes[cur].zero = idx

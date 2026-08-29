@@ -62,7 +62,7 @@ test "HEADERS frame round-trips with priority, END_HEADERS and padding" {
     padding=0,
   )
   assert_eq(roundtrip(plain) == plain, true)
-  let pri : Priority = { exclusive: true, stream_dependency: 3, weight: 200 }
+  let pri : Priority = { exclusive: true, stream_dependency: 3, weight: 200, }
   let full = Frame::Headers(
     stream_id=5,
     fragment=b"\x82",

@@ -25,7 +25,7 @@ pub async fn Channel::connect(host : String, port : Int) -> Channel {
   let engine = @moonrpc.H2Client::new()
   conn.write(@moonrpc.connection_preface)
   write_frames(conn, engine.preface())
-  { conn, engine }
+  { conn, engine, }
 }
 
 ///|
@@ -54,6 +54,11 @@ async fn Channel::drive(
   id : Int,
   timeout_millis : Int?,
 ) -> @moonrpc.CallReply {
+  // Every path out of here — reply, deadline, cancellation — is the end of this call,
+  // and the engine keeps its buffers until told otherwise. A `Channel` is one
+  // long-lived connection, so without this the state of every RPC it ever carried
+  // stays resident and every settings or window frame walks the lot.
+  defer self.engine.release(id)
   match timeout_millis {
     None => {
       self.pump(id)

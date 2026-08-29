@@ -8,7 +8,7 @@ test "hedging: attempts originate up to the cap, honouring gRPC's ceiling of 5" 
   assert_eq(policy.can_start_another(2), true)
   assert_eq(policy.can_start_another(3), false)
   // A policy configured above gRPC's ceiling is clamped to 5.
-  let greedy = { ..policy, max_attempts: 8 }
+  let greedy = { ..policy, max_attempts: 8, }
   assert_eq(greedy.attempt_cap(), 5)
   assert_eq(greedy.can_start_another(4), true)
   assert_eq(greedy.can_start_another(5), false)
@@ -32,7 +32,7 @@ test "hedging: delay is exposed and never negative" {
   let policy = HedgingPolicy::default()
   assert_eq(policy.delay_millis(), 500)
   // Fire-all-at-once.
-  assert_eq({ ..policy, hedging_delay_millis: 0 }.delay_millis(), 0)
+  assert_eq({ ..policy, hedging_delay_millis: 0, }.delay_millis(), 0)
   // A misconfigured negative delay is floored at zero.
-  assert_eq({ ..policy, hedging_delay_millis: -5 }.delay_millis(), 0)
+  assert_eq({ ..policy, hedging_delay_millis: -5, }.delay_millis(), 0)
 }

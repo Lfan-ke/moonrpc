@@ -27,7 +27,7 @@ pub fn ConnectionPool::new(
     order.push(address)
     subconns[address] = SubConn::new(address)
   }
-  { order, subconns, policy, cursor: 0 }
+  { order, subconns, policy, cursor: 0, }
 }
 
 ///|

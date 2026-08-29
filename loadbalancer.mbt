@@ -25,7 +25,7 @@ pub fn LoadBalancer::new(
   addresses : Array[String],
   policy? : LbPolicy = PickFirst,
 ) -> LoadBalancer {
-  { addresses, policy, cursor: 0 }
+  { addresses, policy, cursor: 0, }
 }
 
 ///|

@@ -209,7 +209,7 @@ pub struct ReflectionService {
 /// An empty reflection service. Add the descriptors of the services you serve with
 /// `add_file`.
 pub fn ReflectionService::new() -> ReflectionService {
-  { files: [], by_symbol: Map([]), by_filename: Map([]), services: [] }
+  { files: [], by_symbol: Map([]), by_filename: Map([]), services: [], }
 }
 
 ///|

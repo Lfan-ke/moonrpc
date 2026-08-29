@@ -34,8 +34,13 @@ async fn write_frames(
 /// Drive one accepted h2c connection to completion: validate the client
 /// connection preface, send the server SETTINGS, then loop — read a frame, feed it
 /// to the engine, write back whatever the engine produces — until the peer closes
-/// the connection or a GOAWAY is seen.
-async fn drive(conn : @socket.Tcp, engine : @moonrpc.H2Server) -> Unit {
+/// the connection, a GOAWAY is seen, or the server is shutting down and this
+/// connection has finished its last call.
+async fn drive(
+  conn : @socket.Tcp,
+  engine : @moonrpc.H2Server,
+  draining : () -> Bool,
+) -> Unit {
   let preface = conn.read_exactly(@moonrpc.connection_preface.length())
   if !@moonrpc.has_connection_preface(preface) {
     return
@@ -45,6 +50,10 @@ async fn drive(conn : @socket.Tcp, engine : @moonrpc.H2Server) -> Unit {
     let frame = read_frame(conn)
     write_frames(conn, engine.feed(frame))
     if engine.goaway_received() {
+      break
+    }
+    if draining() && engine.active_streams() == 0 {
+      write_frames(conn, engine.goaway(engine.highest_stream()))
       break
     }
   }
@@ -57,12 +66,26 @@ async fn drive(conn : @socket.Tcp, engine : @moonrpc.H2Server) -> Unit {
 /// engine (HPACK and flow control are per-connection state).
 pub(all) struct GrpcServer {
   handlers : Map[String, @moonrpc.Handler]
+  // The connections being served right now, keyed by a serial number, so that a shutdown
+  // can reach them. A connection removes itself when its driver returns; the engine
+  // comes along because a shutdown has to ask whether the connection is between calls
+  // before it interrupts.
+  live : Map[Int, (@socket.Tcp, @moonrpc.H2Server)]
+  mut listener : @socket.TcpServer?
+  mut draining : Bool
+  mut next_conn : Int
 }
 
 ///|
 /// A gRPC server with no registered methods.
 pub fn GrpcServer::new() -> GrpcServer {
-  { handlers: Map([]) }
+  {
+    handlers: Map([]),
+    live: Map([]),
+    listener: None,
+    draining: false,
+    next_conn: 0,
+  }
 }
 
 ///|
@@ -142,9 +165,9 @@ fn GrpcServer::engine(self : GrpcServer) -> @moonrpc.H2Server {
 }
 
 ///|
-/// Serve gRPC over h2c on `host:port`, blocking in the accept loop until the
-/// running task is cancelled. Each connection is driven by `drive`; a failure on
-/// one connection is isolated and does not stop the server.
+/// Serve gRPC over h2c on `host:port`, blocking in the accept loop until the running
+/// task is cancelled or `graceful_stop` drains the server. Each connection is driven
+/// by `drive`; a failure on one connection is isolated and does not stop the server.
 pub async fn GrpcServer::serve(
   self : GrpcServer,
   host? : String = "127.0.0.1",
@@ -154,11 +177,95 @@ pub async fn GrpcServer::serve(
     @socket.Addr::parse(host + ":" + port.to_string()),
     reuse_addr=true,
   )
-  server.run_forever((conn, _addr) => {
-    drive(conn, self.engine()) catch {
-      _ => ()
+  self.listener = Some(server)
+  self.draining = false
+  // The listener is closed from this task and nowhere else. Closing a socket that
+  // another task is parked in `accept` on does not wake that task — it wedges it,
+  // beyond the reach of cancellation — which is why `graceful_stop` knocks on the
+  // port instead of reaching in here.
+  defer self.shut(server)
+  @async.with_task_group(g => {
+    for ;; {
+      let (conn, _addr) = server.accept()
+      if self.draining {
+        conn.close()
+        break
+      }
+      let engine = self.engine()
+      let id = self.next_conn
+      self.next_conn = id + 1
+      self.live[id] = (conn, engine)
+      g.spawn_bg(allow_failure=true, () => {
+        defer conn.close()
+        defer self.live.remove(id)
+        drive(conn, engine, () => self.draining) catch {
+          _ => ()
+        }
+      })
     }
   })
+}
+
+///|
+/// Release the listening socket and forget it. Only `serve` calls this, on its way out.
+fn GrpcServer::shut(self : GrpcServer, server : @socket.TcpServer) -> Unit {
+  server.close()
+  self.listener = None
+}
+
+///|
+/// Stop serving without cutting anyone off: stop accepting new connections, let the
+/// calls that are already running finish, and send every connection a GOAWAY naming
+/// the last stream it opened, so clients know what was accepted and can reconnect
+/// elsewhere. Returns once the last connection is gone, or after `grace`
+/// milliseconds — a client that received the GOAWAY and then went quiet without
+/// closing cannot be waited on forever. `serve` returns on its own once the accept
+/// loop and the last driver are done, so the task running it ends without being
+/// cancelled; if the grace period ran out with connections still open, cancelling
+/// that task is what releases them.
+pub async fn GrpcServer::graceful_stop(
+  self : GrpcServer,
+  grace? : Int = 10000,
+) -> Unit {
+  self.draining = true
+  // Knock on our own port. The accept loop is parked and only looks at `draining`
+  // when a connection arrives, so this is what lets it notice and stop accepting.
+  match self.listener {
+    Some(l) =>
+      try {
+        let knock = @socket.Tcp::connect(l.addr)
+        knock.close()
+      } catch {
+        _ => ()
+      }
+    None => ()
+  }
+  let deadline = @async.now() + grace.to_int64()
+  while self.live.length() > 0 && @async.now() < deadline {
+    for l in self.snapshot() {
+      let (conn, engine) = l
+      if engine.active_streams() == 0 {
+        write_frames(conn, engine.goaway(engine.highest_stream())) catch {
+          _ => ()
+        }
+      }
+    }
+    @async.sleep(10)
+  }
+}
+
+///|
+/// The live connections as they stand right now. A shutdown suspends while it writes
+/// and sleeps, and a driver that returns in the meantime removes itself, so walking
+/// the map directly would be walking it while it changes.
+fn GrpcServer::snapshot(
+  self : GrpcServer,
+) -> Array[(@socket.Tcp, @moonrpc.H2Server)] {
+  let out = []
+  for _id, l in self.live {
+    out.push(l)
+  }
+  out
 }
 
 ///|
@@ -189,12 +296,12 @@ async fn unary_call(
   // request HEADERS (HPACK-encoded pseudo-headers) then a single DATA message.
   let enc = @moonrpc.HpackEncoder::new()
   let block = enc.encode([
-    { name: b":method", value: b"POST" },
-    { name: b":scheme", value: b"http" },
-    { name: b":path", value: path },
-    { name: b":authority", value: b"127.0.0.1" },
-    { name: b"content-type", value: b"application/grpc" },
-    { name: b"te", value: b"trailers" },
+    { name: b":method", value: b"POST", },
+    { name: b":scheme", value: b"http", },
+    { name: b":path", value: path, },
+    { name: b":authority", value: b"127.0.0.1", },
+    { name: b"content-type", value: b"application/grpc", },
+    { name: b"te", value: b"trailers", },
   ])
   conn.write(
     @moonrpc.Frame::Headers(
@@ -323,12 +430,12 @@ async fn streaming_call(
   conn.write(@moonrpc.Frame::Settings(params=[], ack=false).encode())
   let enc = @moonrpc.HpackEncoder::new()
   let block = enc.encode([
-    { name: b":method", value: b"POST" },
-    { name: b":scheme", value: b"http" },
-    { name: b":path", value: path },
-    { name: b":authority", value: b"127.0.0.1" },
-    { name: b"content-type", value: b"application/grpc" },
-    { name: b"te", value: b"trailers" },
+    { name: b":method", value: b"POST", },
+    { name: b":scheme", value: b"http", },
+    { name: b":path", value: path, },
+    { name: b":authority", value: b"127.0.0.1", },
+    { name: b"content-type", value: b"application/grpc", },
+    { name: b"te", value: b"trailers", },
   ])
   let n = requests.length()
   conn.write(
@@ -560,6 +667,118 @@ async test "reflection: a real h2c bidi call lists and describes a registered se
       _ => true
     }
     assert_eq(broke, true)
+    task.cancel()
+  })
+}
+
+///|
+/// Graceful shutdown over a real socket: a call that is already running is served to
+/// completion, the connection then gets its GOAWAY, `serve` returns on its own, and
+/// the port stops accept
+
+///|
+/// Graceful shutdown over a real socket: the call already running is served to
+/// completion, the connection then gets its GOAWAY and closes, `serve` returns on
+/// its own, and the port stops accepting.
+async test "graceful_stop drains in-flight calls and releases the port" {
+  @async.with_task_group(g => {
+    let server = GrpcServer::new()
+    server.register("/echo.Echo/Say", req => cat(b"echo:", req))
+    let mut served = false
+    let task = g.spawn(() => {
+      server.serve(port=18077)
+      served = true
+    })
+    @async.sleep(300)
+    let (status, grpc_status, reply) = unary_call(
+      "127.0.0.1", 18077, b"/echo.Echo/Say", b"qwq",
+    )
+    assert_eq(status == b"200", true)
+    assert_eq(grpc_status == b"0", true)
+    assert_eq(reply == b"echo:qwq", true)
+    server.graceful_stop(grace=3000)
+    @async.sleep(200)
+    // The accept loop unwound by itself rather than being cancelled.
+    assert_eq(served, true)
+    assert_eq(server.live.length(), 0)
+    task.cancel()
+  })
+}
+
+///|
+/// A call that is still open when the drain starts is served to completion rather
+/// than cut off: the stream is opened, `graceful_stop` runs while it is in flight,
+/// and only then does the request body arrive. The reply still comes back OK.
+async test "graceful_stop lets a call that is already open finish" {
+  @async.with_task_group(g => {
+    let server = GrpcServer::new()
+    server.register("/echo.Echo/Say", req => cat(b"echo:", req))
+    let task = g.spawn(() => server.serve(port=18079))
+    @async.sleep(300)
+    let conn = @socket.Tcp::connect(@socket.Addr::parse("127.0.0.1:18079"))
+    conn.write(@moonrpc.connection_preface)
+    conn.write(@moonrpc.Frame::Settings(params=[], ack=false).encode())
+    let enc = @moonrpc.HpackEncoder::new()
+    let block = enc.encode([
+      { name: b":method", value: b"POST", },
+      { name: b":scheme", value: b"http", },
+      { name: b":path", value: b"/echo.Echo/Say", },
+      { name: b"content-type", value: b"application/grpc", },
+      { name: b"te", value: b"trailers", },
+    ])
+    // HEADERS without END_STREAM: the stream is open and the server is waiting on us.
+    conn.write(
+      @moonrpc.Frame::Headers(
+        stream_id=1,
+        fragment=block,
+        end_stream=false,
+        end_headers=true,
+        priority=None,
+        padding=0,
+      ).encode(),
+    )
+    @async.sleep(200)
+    let drain = g.spawn(() => server.graceful_stop(grace=5000))
+    @async.sleep(200)
+    // Now finish the request. A server that cut the call off at the drain would have
+    // closed this socket already.
+    conn.write(
+      @moonrpc.Frame::Data(
+        stream_id=1,
+        data=@moonrpc.encode_message(b"hhh"),
+        end_stream=true,
+        padding=0,
+      ).encode(),
+    )
+    let dec = @moonrpc.HpackDecoder::new()
+    let mut grpc_status = b""
+    let mut body = b""
+    let mut done = false
+    while !done {
+      let frame = read_frame(conn)
+      match frame {
+        Headers(fragment~, end_stream~, ..) => {
+          for h in dec.decode(fragment) {
+            if h.name == b"grpc-status" {
+              grpc_status = h.value
+            }
+          }
+          if end_stream {
+            done = true
+          }
+        }
+        Data(data~, ..) => body = cat(body, data)
+        _ => ()
+      }
+    }
+    assert_eq(grpc_status == b"0", true)
+    let message = match @moonrpc.decode_message(body) {
+      Some((_, p)) => p
+      None => b""
+    }
+    assert_eq(message == b"echo:hhh", true)
+    conn.close()
+    drain.wait()
     task.cancel()
   })
 }

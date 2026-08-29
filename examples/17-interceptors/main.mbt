@@ -57,7 +57,7 @@ fn bcat(a : Bytes, b : Bytes) -> Bytes {
 
 ///|
 fn ascii(bs : Bytes) -> String {
-  let buf = StringBuilder::new()
+  let buf = StringBuilder()
   for b in bs {
     buf.write_char((b.to_int() & 0xFF).unsafe_to_char())
   }

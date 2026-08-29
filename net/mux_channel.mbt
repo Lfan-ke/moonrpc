@@ -109,6 +109,9 @@ pub async fn MuxChannel::unary(
     inbox.get()
   }
   self.inboxes.remove(id)
+  // The inbox goes; so must the engine's buffers for this call, or a multiplexed
+  // connection accumulates every RPC it has ever carried.
+  defer self.engine.release(id)
   self.engine.reply(id)
 }
 
@@ -136,7 +139,7 @@ pub fn MuxChannel::open_bidi(
   let id = self.engine.open(path, metadata~)
   let inbox : @aqueue.Queue[Unit] = @aqueue.Queue::Queue(kind=Unbounded)
   self.inboxes[id] = inbox
-  { ch: self, id, inbox, pending: [], offset: 0 }
+  { ch: self, id, inbox, pending: [], offset: 0, }
 }
 
 ///|

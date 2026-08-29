@@ -91,12 +91,12 @@ fn drive_request(
 ///|
 fn req_headers(enc : HpackEncoder, path : Bytes, end_stream~ : Bool) -> Frame {
   let block = enc.encode([
-    { name: b":method", value: b"POST" },
-    { name: b":scheme", value: b"http" },
-    { name: b":path", value: path },
-    { name: b":authority", value: b"localhost" },
-    { name: b"content-type", value: b"application/grpc" },
-    { name: b"te", value: b"trailers" },
+    { name: b":method", value: b"POST", },
+    { name: b":scheme", value: b"http", },
+    { name: b":path", value: path, },
+    { name: b":authority", value: b"localhost", },
+    { name: b"content-type", value: b"application/grpc", },
+    { name: b"te", value: b"trailers", },
   ])
   Headers(
     stream_id=1,
@@ -267,10 +267,10 @@ test "metadata and grpc-timeout deadline are surfaced to the handler" {
   })
   let enc = HpackEncoder::new()
   let block = enc.encode([
-    { name: b":path", value: b"/meta.M/Echo" },
-    { name: b"content-type", value: b"application/grpc" },
-    { name: b"grpc-timeout", value: b"2S" },
-    { name: b"x-token", value: b"secret" },
+    { name: b":path", value: b"/meta.M/Echo", },
+    { name: b"content-type", value: b"application/grpc", },
+    { name: b"grpc-timeout", value: b"2S", },
+    { name: b"x-token", value: b"secret", },
   ])
   let _ = engine.feed(Settings(params=[], ack=false))
   let dec = HpackDecoder::new()

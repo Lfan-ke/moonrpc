@@ -253,15 +253,15 @@ fn H2Client::produce_request(self : H2Client, c : ClientCall) -> Array[Frame] {
   let frames : Array[Frame] = []
   if !c.req_headers_sent {
     let headers : Array[Header] = [
-      { name: b":method", value: b"POST" },
-      { name: b":scheme", value: b"http" },
-      { name: b":path", value: c.path },
-      { name: b":authority", value: c.authority },
-      { name: b"te", value: b"trailers" },
-      { name: b"content-type", value: b"application/grpc" },
+      { name: b":method", value: b"POST", },
+      { name: b":scheme", value: b"http", },
+      { name: b":path", value: c.path, },
+      { name: b":authority", value: c.authority, },
+      { name: b"te", value: b"trailers", },
+      { name: b"content-type", value: b"application/grpc", },
     ]
     match c.timeout {
-      Some(t) => headers.push({ name: b"grpc-timeout", value: t })
+      Some(t) => headers.push({ name: b"grpc-timeout", value: t, })
       None => ()
     }
     for h in c.metadata {
@@ -518,6 +518,16 @@ fn H2Client::pump_requests(self : H2Client) -> Array[Frame] {
     }
   }
   frames
+}
+
+///|
+/// Drop everything the engine still holds for a finished call: its buffered body,
+/// messages, header block and trailers. The map is only ever inserted into otherwise,
+/// so a long-lived connection would keep one full request and response per RPC it has
+/// ever made, and every WINDOW_UPDATE and SETTINGS frame would walk that whole history.
+/// An unknown or already-released id is a no-op.
+pub fn H2Client::release(self : H2Client, id : Int) -> Unit {
+  self.calls.remove(id)
 }
 
 ///|

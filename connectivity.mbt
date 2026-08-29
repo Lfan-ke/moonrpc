@@ -24,7 +24,7 @@ pub struct SubConn {
 ///|
 /// A fresh sub-connection to `address`, starting IDLE.
 pub fn SubConn::new(address : String) -> SubConn {
-  { address, state: Idle }
+  { address, state: Idle, }
 }
 
 ///|

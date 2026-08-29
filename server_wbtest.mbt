@@ -16,12 +16,12 @@ test "engine: a unary request dispatches and is framed as HEADERS + DATA + trail
   engine.register("/echo.Echo/Say", req => concat(b"echo:", req))
   let enc = HpackEncoder::new()
   let block = enc.encode([
-    { name: b":method", value: b"POST" },
-    { name: b":scheme", value: b"http" },
-    { name: b":path", value: b"/echo.Echo/Say" },
-    { name: b":authority", value: b"localhost" },
-    { name: b"content-type", value: b"application/grpc" },
-    { name: b"te", value: b"trailers" },
+    { name: b":method", value: b"POST", },
+    { name: b":scheme", value: b"http", },
+    { name: b":path", value: b"/echo.Echo/Say", },
+    { name: b":authority", value: b"localhost", },
+    { name: b"content-type", value: b"application/grpc", },
+    { name: b"te", value: b"trailers", },
   ])
   // client preface (SETTINGS) then the request stream.
   let _ = engine.feed(Settings(params=[], ack=false))
@@ -107,7 +107,7 @@ test "engine: SETTINGS is acknowledged; PING is answered" {
 test "engine: an unknown method gets a trailers-only UNIMPLEMENTED response" {
   let engine = H2Server::new()
   let enc = HpackEncoder::new()
-  let block = enc.encode([{ name: b":path", value: b"/nope.Svc/Method" }])
+  let block = enc.encode([{ name: b":path", value: b"/nope.Svc/Method", }])
   let _ = engine.feed(Settings(params=[], ack=false))
   let out = engine.feed(
     Headers(
@@ -156,7 +156,7 @@ test "engine: a small send window splits the reply and a WINDOW_UPDATE releases 
   // a 20-byte reply, larger than the window we advertise.
   engine.register("/big.Svc/M", _req => b"0123456789ABCDEFGHIJ")
   let enc = HpackEncoder::new()
-  let block = enc.encode([{ name: b":path", value: b"/big.Svc/M" }])
+  let block = enc.encode([{ name: b":path", value: b"/big.Svc/M", }])
   // peer advertises a tiny 5-octet initial window before opening the stream.
   let _ = engine.feed(
     Settings(params=[(settings_initial_window_size, 5)], ack=false),
@@ -221,8 +221,8 @@ test "engine: a compressed request under an unsupported encoding gets UNIMPLEMEN
   engine.register("/echo.Echo/Say", req => req)
   let enc = HpackEncoder::new()
   let block = enc.encode([
-    { name: b":path", value: b"/echo.Echo/Say" },
-    { name: b"grpc-encoding", value: b"snappy" },
+    { name: b":path", value: b"/echo.Echo/Say", },
+    { name: b"grpc-encoding", value: b"snappy", },
   ])
   let _ = engine.feed(Settings(params=[], ack=false))
   let _ = engine.feed(
@@ -271,7 +271,7 @@ test "add_window saturates at 2^31-1 instead of wrapping negative" {
 test "engine: a CONTINUATION past the header-size cap is rejected, not buffered forever" {
   let engine = H2Server::new()
   let enc = HpackEncoder::new()
-  let block = enc.encode([{ name: b":path", value: b"/e.E/M" }])
+  let block = enc.encode([{ name: b":path", value: b"/e.E/M", }])
   let _ = engine.feed(Settings(params=[], ack=false))
   let _ = engine.feed(
     Headers(
@@ -303,7 +303,7 @@ test "engine: a HEADERS on an even (server-initiated) stream id is a protocol er
   let engine = H2Server::new()
   engine.register("/e.E/M", req => req)
   let enc = HpackEncoder::new()
-  let block = enc.encode([{ name: b":path", value: b"/e.E/M" }])
+  let block = enc.encode([{ name: b":path", value: b"/e.E/M", }])
   let _ = engine.feed(Settings(params=[], ack=false))
   // Stream id 2 is even, so server-initiated — a client must not open it.
   let raised = try {
@@ -329,7 +329,7 @@ test "engine: a message length prefix past the cap gets RESOURCE_EXHAUSTED, not 
   let engine = H2Server::new()
   engine.register("/echo.Echo/Say", req => req)
   let enc = HpackEncoder::new()
-  let block = enc.encode([{ name: b":path", value: b"/echo.Echo/Say" }])
+  let block = enc.encode([{ name: b":path", value: b"/echo.Echo/Say", }])
   let _ = engine.feed(Settings(params=[], ack=false))
   let _ = engine.feed(
     Headers(
@@ -372,8 +372,8 @@ test "engine: a gzip-compressed request is inflated and reaches the handler" {
   engine.register("/echo.Echo/Say", req => req)
   let enc = HpackEncoder::new()
   let block = enc.encode([
-    { name: b":path", value: b"/echo.Echo/Say" },
-    { name: b"grpc-encoding", value: b"gzip" },
+    { name: b":path", value: b"/echo.Echo/Say", },
+    { name: b"grpc-encoding", value: b"gzip", },
   ])
   let _ = engine.feed(Settings(params=[], ack=false))
   let _ = engine.feed(

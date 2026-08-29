@@ -89,7 +89,7 @@ pub struct PbWriter {
 ///|
 /// A fresh, empty message encoder.
 pub fn PbWriter::new() -> PbWriter {
-  { buf: Buffer() }
+  { buf: Buffer(), }
 }
 
 ///|
@@ -255,7 +255,7 @@ pub struct PbReader {
 ///|
 /// A reader positioned at the start of `data`.
 pub fn PbReader::new(data : Bytes) -> PbReader {
-  { data, pos: 0 }
+  { data, pos: 0, }
 }
 
 ///|

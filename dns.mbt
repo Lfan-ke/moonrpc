@@ -196,10 +196,10 @@ pub fn dns_decode_response(msg : Bytes) -> DnsResponse {
     } else {
       ""
     }
-    answers.push({ name, rtype, ttl, address })
+    answers.push({ name, rtype, ttl, address, })
     off = rdata + rdlen
   }
-  { id, rcode, answers }
+  { id, rcode, answers, }
 }
 
 ///|

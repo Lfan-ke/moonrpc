@@ -58,9 +58,9 @@ test "client: a gzip-encoded response message is inflated for the caller" {
   let _ = client.feed(Settings(params=[], ack=false))
   let enc = HpackEncoder::new()
   let hblock = enc.encode([
-    { name: b":status", value: b"200" },
-    { name: b"content-type", value: b"application/grpc" },
-    { name: b"grpc-encoding", value: b"gzip" },
+    { name: b":status", value: b"200", },
+    { name: b"content-type", value: b"application/grpc", },
+    { name: b"grpc-encoding", value: b"gzip", },
   ])
   let _ = client.feed(
     Headers(
@@ -83,7 +83,7 @@ test "client: a gzip-encoded response message is inflated for the caller" {
       padding=0,
     ),
   )
-  let tblock = enc.encode([{ name: b"grpc-status", value: b"0" }])
+  let tblock = enc.encode([{ name: b"grpc-status", value: b"0", }])
   let _ = client.feed(
     Headers(
       stream_id=id,
@@ -111,9 +111,9 @@ test "client: a response header block split across HEADERS + CONTINUATION is rea
   let _ = client.feed(Settings(params=[], ack=false))
   let enc = HpackEncoder::new()
   let block = enc.encode([
-    { name: b":status", value: b"200" },
-    { name: b"content-type", value: b"application/grpc" },
-    { name: b"x-custom", value: b"hello" },
+    { name: b":status", value: b"200", },
+    { name: b"content-type", value: b"application/grpc", },
+    { name: b"x-custom", value: b"hello", },
   ])
   // Deliver the block in two frames: HEADERS(end_headers=false) then CONTINUATION.
   // The custom header is only recoverable if the fragments are concatenated before
@@ -136,7 +136,7 @@ test "client: a response header block split across HEADERS + CONTINUATION is rea
       end_headers=true,
     ),
   )
-  let tblock = enc.encode([{ name: b"grpc-status", value: b"0" }])
+  let tblock = enc.encode([{ name: b"grpc-status", value: b"0", }])
   let _ = client.feed(
     Headers(
       stream_id=id,
@@ -160,9 +160,9 @@ test "client: a compressed reply under an unsupported encoding fails INTERNAL, n
   let _ = client.feed(Settings(params=[], ack=false))
   let enc = HpackEncoder::new()
   let hblock = enc.encode([
-    { name: b":status", value: b"200" },
-    { name: b"content-type", value: b"application/grpc" },
-    { name: b"grpc-encoding", value: b"deflate" },
+    { name: b":status", value: b"200", },
+    { name: b"content-type", value: b"application/grpc", },
+    { name: b"grpc-encoding", value: b"deflate", },
   ])
   let _ = client.feed(
     Headers(
@@ -184,7 +184,7 @@ test "client: a compressed reply under an unsupported encoding fails INTERNAL, n
       padding=0,
     ),
   )
-  let tblock = enc.encode([{ name: b"grpc-status", value: b"0" }])
+  let tblock = enc.encode([{ name: b"grpc-status", value: b"0", }])
   let _ = client.feed(
     Headers(
       stream_id=id,
@@ -282,7 +282,7 @@ test "client+server: request metadata reaches the handler; response metadata rea
   })
   let client = H2Client::new()
   let id = client.open("/meta.M/Do", metadata=[
-    { name: b"x-token", value: b"abc" },
+    { name: b"x-token", value: b"abc", },
   ])
   let frames = client.send(id, b"", end=true)
   drive_pair(server, client, id, frames)
@@ -360,7 +360,7 @@ test "client: a reply split across two DATA frames is reassembled into one messa
   let _ = client.feed(
     Headers(
       stream_id=id,
-      fragment=enc.encode([{ name: b":status", value: b"200" }]),
+      fragment=enc.encode([{ name: b":status", value: b"200", }]),
       end_stream=false,
       end_headers=true,
       priority=None,
@@ -385,7 +385,7 @@ test "client: a reply split across two DATA frames is reassembled into one messa
   let _ = client.feed(
     Headers(
       stream_id=id,
-      fragment=enc.encode([{ name: b"grpc-status", value: b"0" }]),
+      fragment=enc.encode([{ name: b"grpc-status", value: b"0", }]),
       end_stream=true,
       end_headers=true,
       priority=None,

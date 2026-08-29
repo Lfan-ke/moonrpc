@@ -77,7 +77,7 @@ fn read_text(msg : Bytes) -> String {
 
 ///|
 fn ascii_upper(s : String) -> String {
-  let buf = StringBuilder::new()
+  let buf = StringBuilder()
   for c in s {
     let v = c.to_int()
     buf.write_char(

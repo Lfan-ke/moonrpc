@@ -132,7 +132,7 @@ pub fn FieldDescriptor::scalar(
   type_ : FieldType,
   label? : FieldLabel = LabelOptional,
 ) -> FieldDescriptor {
-  { name, number, label, type_, type_name: "" }
+  { name, number, label, type_, type_name: "", }
 }
 
 ///|
@@ -168,7 +168,7 @@ pub fn FieldDescriptor::decode(body : Bytes) -> FieldDescriptor raise PbError {
       (_, w) => r.skip(w)
     }
   }
-  { name, number, label, type_, type_name }
+  { name, number, label, type_, type_name, }
 }
 
 ///|
@@ -204,7 +204,7 @@ pub fn MessageDescriptor::decode(
       (_, w) => r.skip(w)
     }
   }
-  { name, fields }
+  { name, fields, }
 }
 
 ///|
@@ -254,7 +254,7 @@ pub fn MethodDescriptor::decode(body : Bytes) -> MethodDescriptor raise PbError 
       (_, w) => r.skip(w)
     }
   }
-  { name, input_type, output_type, client_streaming, server_streaming }
+  { name, input_type, output_type, client_streaming, server_streaming, }
 }
 
 ///|
@@ -290,7 +290,7 @@ pub fn ServiceDescriptor::decode(
       (_, w) => r.skip(w)
     }
   }
-  { name, methods }
+  { name, methods, }
 }
 
 ///|
@@ -313,7 +313,7 @@ pub fn FileDescriptor::new(
   messages? : Array[MessageDescriptor] = [],
   services? : Array[ServiceDescriptor] = [],
 ) -> FileDescriptor {
-  { name, package_, messages, services, syntax: "proto3" }
+  { name, package_, messages, services, syntax: "proto3", }
 }
 
 ///|
@@ -357,7 +357,7 @@ pub fn FileDescriptor::decode(body : Bytes) -> FileDescriptor raise PbError {
       (_, w) => r.skip(w)
     }
   }
-  { name, package_, messages, services, syntax }
+  { name, package_, messages, services, syntax, }
 }
 
 ///|
