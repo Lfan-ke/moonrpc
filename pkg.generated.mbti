@@ -393,6 +393,7 @@ pub struct H2Client {
   mut remote_max_frame : Int
   mut goaway_received : Bool
   mut goaway_last_stream_id : Int
+  orphan_blocks : Map[Int, @buffer.Buffer]
 }
 pub fn H2Client::close_send(Self, Int) -> Array[Frame]
 pub fn H2Client::feed(Self, Frame) -> Array[Frame] raise

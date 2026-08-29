@@ -439,3 +439,37 @@ test "client: a GOAWAY drains the connection — refuses new streams, marks unpr
   assert_eq(client.open("/qwe/qwq"), 0)
   assert_eq(client.next_id, 237)
 }
+
+///|
+/// A header block larger than the peer's MAX_FRAME_SIZE goes out as HEADERS plus
+/// CONTINUATION. Emitting it as one frame is a FRAME_SIZE_ERROR at the far end, and
+/// a request carrying a large `-bin` value gets there easily. The floor the RFC puts
+/// on MAX_FRAME_SIZE is 2^14, so the block has to actually exceed that.
+test "an oversized request header block is split into CONTINUATION frames" {
+  let e = H2Client::new()
+  let big = Bytes::from_array(Array::make(20000, b'x'))
+  let (_id, frames) = e.unary("/echo.E/Say", b"hi", metadata=[
+    { name: b"x-big-bin", value: big, },
+  ])
+  let mut headers = 0
+  let mut continuations = 0
+  let mut last_end_headers = false
+  for f in frames {
+    match f {
+      Headers(end_headers~, fragment~, ..) => {
+        headers = headers + 1
+        assert_eq(fragment.length() <= default_max_frame_size, true)
+        last_end_headers = end_headers
+      }
+      Continuation(fragment~, end_headers~, ..) => {
+        continuations = continuations + 1
+        assert_eq(fragment.length() <= default_max_frame_size, true)
+        last_end_headers = end_headers
+      }
+      _ => ()
+    }
+  }
+  assert_eq(headers, 1)
+  assert_eq(continuations > 0, true)
+  assert_eq(last_end_headers, true)
+}

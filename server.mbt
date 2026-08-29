@@ -923,16 +923,12 @@ fn H2Server::produce(self : H2Server, s : SrvStream) -> Array[Frame] raise {
       })
     }
     let block = self.encoder.encode(trailers)
-    frames.push(
-      Headers(
-        stream_id=s.id,
-        fragment=block,
-        end_stream=true,
-        end_headers=true,
-        priority=None,
-        padding=0,
-      ),
-    )
+    // Split like every other header block: a block over the peer's MAX_FRAME_SIZE is
+    // a FRAME_SIZE_ERROR at the far end, and rich error details make trailers the
+    // block most likely to get there.
+    for f in emit_header_frames(s.id, block, true, self.remote_max_frame) {
+      frames.push(f)
+    }
     s.state = s.state.on_send(Headers(end_stream=true))
     s.trailers_sent = true
     // Trailers close the stream, so its buffers will not be read again. The entry

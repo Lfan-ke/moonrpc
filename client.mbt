@@ -128,6 +128,69 @@ pub struct H2Client {
   // it were never seen by the server, so they are safe to re-issue on a fresh
   // connection. Mirrors `H2Server::last_client_stream`.
   mut goaway_last_stream_id : Int
+  // Header blocks arriving for streams this client no longer tracks. They still
+  // have to reach the decoder — HPACK's table is per-connection — so they are
+  // accumulated here and dropped once complete.
+  orphan_blocks : Map[Int, @buffer.Buffer]
+}
+
+///|
+/// A request header block as HEADERS plus as many CONTINUATION frames as the peer's
+/// `SETTINGS_MAX_FRAME_SIZE` requires. Mirrors the server's `emit_header_frames`;
+/// both exist because a field block is one logical unit that the framing layer has
+/// to cut up, and a peer treats an oversized frame as a connection error.
+fn emit_request_header_frames(
+  stream_id : Int,
+  block : Bytes,
+  end_stream : Bool,
+  max_frame_in : Int,
+) -> Array[Frame] {
+  let max_frame = if max_frame_in < 1 {
+    default_max_frame_size
+  } else {
+    max_frame_in
+  }
+  let frames : Array[Frame] = []
+  if block.length() <= max_frame {
+    frames.push(
+      Headers(
+        stream_id~,
+        fragment=block,
+        end_stream~,
+        end_headers=true,
+        priority=None,
+        padding=0,
+      ),
+    )
+    return frames
+  }
+  frames.push(
+    Headers(
+      stream_id~,
+      fragment=block[0:max_frame].to_owned(),
+      end_stream~,
+      end_headers=false,
+      priority=None,
+      padding=0,
+    ),
+  )
+  let mut off = max_frame
+  while off < block.length() {
+    let end = if off + max_frame < block.length() {
+      off + max_frame
+    } else {
+      block.length()
+    }
+    frames.push(
+      Continuation(
+        stream_id~,
+        fragment=block[off:end].to_owned(),
+        end_headers=end == block.length(),
+      ),
+    )
+    off = end
+  }
+  frames
 }
 
 ///|
@@ -144,6 +207,7 @@ pub fn H2Client::new() -> H2Client {
     remote_max_frame: default_max_frame_size,
     goaway_received: false,
     goaway_last_stream_id: 0,
+    orphan_blocks: Map([]),
   }
 }
 
@@ -273,16 +337,11 @@ fn H2Client::produce_request(self : H2Client, c : ClientCall) -> Array[Frame] {
     }
     let block = self.encoder.encode(headers)
     let end = c.req_ended && c.out.length() == 0
-    frames.push(
-      Headers(
-        stream_id=c.id,
-        fragment=block,
-        end_stream=end,
-        end_headers=true,
-        priority=None,
-        padding=0,
-      ),
-    )
+    // A request carrying more metadata than the peer's MAX_FRAME_SIZE has to go out
+    // as HEADERS + CONTINUATION, or the peer answers FRAME_SIZE_ERROR.
+    for f in emit_request_header_frames(c.id, block, end, self.remote_max_frame) {
+      frames.push(f)
+    }
     c.req_headers_sent = true
     if end {
       c.req_fin_sent = true
@@ -359,13 +418,17 @@ pub fn H2Client::feed(self : H2Client, frame : Frame) -> Array[Frame] raise {
             c.in_headers = true
           }
         }
-        None => ()
+        // A block for a stream we no longer track — trailers racing a release, or a
+        // stream we reset — still has to go through the decoder. HPACK state is
+        // per-connection: skipping one block desynchronises the table and every
+        // later call on this connection decodes garbage.
+        None => self.drain_orphan_block(stream_id, fragment, end_headers)
       }
       []
     }
-    Continuation(stream_id~, fragment~, end_headers~) => {
+    Continuation(stream_id~, fragment~, end_headers~) =>
       match self.calls.get(stream_id) {
-        Some(c) =>
+        Some(c) => {
           if c.in_headers {
             c.header_block.write_bytes(fragment)
             guard_header_size(c.header_block)
@@ -373,10 +436,13 @@ pub fn H2Client::feed(self : H2Client, frame : Frame) -> Array[Frame] raise {
               self.deliver_headers(c)
             }
           }
-        None => ()
+          []
+        }
+        None => {
+          self.drain_orphan_block(stream_id, fragment, end_headers)
+          []
+        }
       }
-      []
-    }
     Data(stream_id~, data~, end_stream~, padding~) =>
       match self.calls.get(stream_id) {
         Some(c) => {
@@ -413,6 +479,33 @@ pub fn H2Client::feed(self : H2Client, frame : Frame) -> Array[Frame] raise {
       []
     }
     Priority(..) | PushPromise(..) | Unknown(..) => []
+  }
+}
+
+///|
+/// Accumulate a header block for a stream this client no longer tracks, and decode
+/// it once complete. The result is thrown away — nobody is waiting for it — but the
+/// decode itself is mandatory: HPACK's table is connection-wide, so a block that is
+/// never fed leaves our decoder disagreeing with the peer's encoder for good.
+fn H2Client::drain_orphan_block(
+  self : H2Client,
+  stream_id : Int,
+  fragment : Bytes,
+  end_headers : Bool,
+) -> Unit raise {
+  let buf = match self.orphan_blocks.get(stream_id) {
+    Some(b) => b
+    None => {
+      let b = @buffer.Buffer()
+      self.orphan_blocks[stream_id] = b
+      b
+    }
+  }
+  buf.write_bytes(fragment)
+  guard_header_size(buf)
+  if end_headers {
+    let _ = self.decoder.decode(buf.to_bytes())
+    self.orphan_blocks.remove(stream_id)
   }
 }
 
