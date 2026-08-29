@@ -74,8 +74,21 @@ SECTIONS = [
      "The native Channel: a long-lived, multiplexed h2c connection over a real @socket.Tcp, "
      "driven by the H2Client engine, performing unary, server- and client-streaming calls and "
      "enforcing the grpc-timeout deadline by racing the read loop against a timer."),
+    ("policy", ("retry.mbt", "hedging.mbt", "keepalive.mbt"), "Call policy",
+     "What a client does around a call rather than inside it: the retry policy and "
+     "its backoff, hedged attempts across backends, and the keepalive pings that "
+     "keep an idle connection from being reaped."),
+    ("balancing", ("loadbalancer.mbt", "connectivity.mbt", "dns.mbt", "pool.mbt"), "Load balancing and naming",
+     "Picking a backend and knowing whether it is reachable: the balancers, the "
+     "connectivity state machine gRPC defines, DNS resolution, and the channel pool."),
+    ("channels", ("net/mux_channel.mbt", "net/managed_channel.mbt", "net/resolver.mbt"), "Channels over a socket",
+     "The native client transports: a multiplexing channel that demultiplexes "
+     "concurrent calls on one connection, a managed channel that dials several "
+     "backends and routes around the dead ones, and the resolver behind it."),
+    ("codecs", ("gzip.mbt", "base64.mbt"), "Codecs",
+     "The gzip message compression gRPC negotiates and the base64 used by "
+     "binary metadata, written here so the wire format needs no native binding."),
 ]
-
 KIND = {"struct": "struct", "enum": "enum", "fn": "fn", "type": "type", "let": "let"}
 
 
@@ -286,7 +299,8 @@ def main():
     for sid, rel, title, desc in SECTIONS:
         body.append('<section class="pkg" id="%s"><h2><span class="at">§</span>%s</h2>'
                     '<p class="pdesc">%s</p>' % (sid, title, esc(desc)))
-        for kind, sig, doc in parse(ROOT / rel):
+        files = rel if isinstance(rel, tuple) else (rel,)
+        for kind, sig, doc in [it for f in files for it in parse(ROOT / f)]:
             total += 1
             body.append('<div class="item" data-k="%s"><span class="kind">%s</span>'
                         '<pre class="sig">%s</pre>%s</div>'
