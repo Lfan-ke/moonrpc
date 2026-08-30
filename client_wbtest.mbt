@@ -473,3 +473,96 @@ test "an oversized request header block is split into CONTINUATION frames" {
   assert_eq(continuations > 0, true)
   assert_eq(last_end_headers, true)
 }
+
+// -- a call that ends without trailers ---------------------------------------
+
+///|
+/// Feed `client` a complete response header block for call `id`, ending the stream.
+fn respond(client : H2Client, id : Int, headers : Array[Header]) -> Unit raise {
+  let _ = client.feed(
+    Headers(
+      stream_id=id,
+      fragment=HpackEncoder::new().encode(headers),
+      end_stream=true,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+}
+
+///|
+test "client: a RST_STREAM ends the call with the status its code maps to" {
+  // gRPC PROTOCOL-HTTP2, "HTTP2 Error Code -> Status". A reset arrives instead of
+  // trailers, so the error code is the only thing left to build a status from; without
+  // the mapping every reset reads as `-1` and a caller cannot tell a stream the server
+  // refused (retry elsewhere) from one it dropped mid-flight.
+  let cases = [
+    (error_refused_stream, Unavailable),
+    (error_enhance_your_calm, ResourceExhausted),
+    (error_inadequate_security, PermissionDenied),
+    (error_cancel, Cancelled),
+    (error_protocol_error, Internal),
+    (error_stream_closed, Internal),
+  ]
+  for pair in cases {
+    let (code, want) = pair
+    let client = H2Client::new()
+    let (id, _req) = client.unary("/echo.Echo/Say", b"qwq")
+    assert_eq(client.feed(RstStream(stream_id=id, error_code=code)).length(), 0)
+    assert_eq(client.is_done(id), true)
+    assert_eq(client.reply(id).grpc_status, Status::code(want))
+  }
+}
+
+///|
+test "client: a grpc-status already received outranks a later RST_STREAM code" {
+  let client = H2Client::new()
+  let (id, _req) = client.unary("/echo.Echo/Say", b"emm")
+  respond(client, id, [
+    { name: b":status", value: b"200", },
+    { name: b"grpc-status", value: b"5", },
+  ])
+  // The server named NOT_FOUND itself; a reset code is a transport-level guess and
+  // must not overwrite it.
+  let _ = client.feed(RstStream(stream_id=id, error_code=error_cancel))
+  assert_eq(client.reply(id).grpc_status, Status::code(NotFound))
+}
+
+///|
+test "client: a non-200 :status with no grpc-status maps per the HTTP mapping" {
+  // gRPC http-grpc-status-mapping: a proxy or a plain HTTP server answering on the
+  // gRPC port sends an HTTP status and no gRPC trailers at all.
+  let cases = [
+    (b"400", Internal),
+    (b"401", Unauthenticated),
+    (b"403", PermissionDenied),
+    (b"404", Unimplemented),
+    (b"429", Unavailable),
+    (b"502", Unavailable),
+    (b"503", Unavailable),
+    (b"504", Unavailable),
+    (b"418", Unknown),
+  ]
+  for pair in cases {
+    let (http, want) = pair
+    let client = H2Client::new()
+    let (id, _req) = client.unary("/echo.Echo/Say", b"hhh")
+    respond(client, id, [{ name: b":status", value: http, }])
+    assert_eq(client.is_done(id), true)
+    assert_eq(client.reply(id).grpc_status, Status::code(want))
+  }
+}
+
+///|
+test "client: a 200 with no grpc-status anywhere still reports -1" {
+  // The mapping covers HTTP-level refusals only. A 200 that never sends a trailer is
+  // a broken gRPC server, and `-1` keeps saying so rather than inventing a status.
+  let client = H2Client::new()
+  let (id, _req) = client.unary("/echo.Echo/Say", b"qwe")
+  respond(client, id, [
+    { name: b":status", value: b"200", },
+    { name: b"content-type", value: b"application/grpc", },
+  ])
+  assert_eq(client.reply(id).grpc_status, -1)
+}

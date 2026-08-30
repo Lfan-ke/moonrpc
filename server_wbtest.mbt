@@ -178,19 +178,15 @@ test "engine: a small send window splits the reply and a WINDOW_UPDATE releases 
   tally(dispatch_out, data_sent, trailer_seen)
   assert_eq(data_sent.val, 5)
   assert_eq(trailer_seen.val, false)
-  // a zero-increment update pumps nothing more (window still exhausted).
-  tally(
-    engine.feed(WindowUpdate(stream_id=0, increment=0)),
-    data_sent,
-    trailer_seen,
-  )
-  assert_eq(data_sent.val, 5)
-  // grow both windows generously and the rest of the body plus the trailer flow.
+  // a connection-level update alone pumps nothing more: the stream window is the
+  // exhausted one.
   tally(
     engine.feed(WindowUpdate(stream_id=0, increment=1000)),
     data_sent,
     trailer_seen,
   )
+  assert_eq(data_sent.val, 5)
+  // growing the stream window too releases the rest of the body and the trailer.
   tally(
     engine.feed(WindowUpdate(stream_id=1, increment=1000)),
     data_sent,
@@ -287,15 +283,15 @@ test "engine: a CONTINUATION past the header-size cap is rejected, not buffered 
   for _i = 0; _i < max_header_list_size + 16; _i = _i + 1 {
     buf.write_byte(b'\x00')
   }
-  let raised = try {
-    let _ = engine.feed(
-      Continuation(stream_id=1, fragment=buf.to_bytes(), end_headers=false),
-    )
-    false
-  } catch {
-    _ => true
+  let out = engine.feed(
+    Continuation(stream_id=1, fragment=buf.to_bytes(), end_headers=false),
+  )
+  assert_eq(out.length(), 1)
+  match out[0] {
+    GoAway(error_code~, ..) => assert_eq(error_code, error_frame_size_error)
+    _ => abort("expected GOAWAY")
   }
-  assert_eq(raised, true)
+  assert_eq(engine.closing(), true)
 }
 
 ///|
@@ -306,22 +302,22 @@ test "engine: a HEADERS on an even (server-initiated) stream id is a protocol er
   let block = enc.encode([{ name: b":path", value: b"/e.E/M", }])
   let _ = engine.feed(Settings(params=[], ack=false))
   // Stream id 2 is even, so server-initiated — a client must not open it.
-  let raised = try {
-    let _ = engine.feed(
-      Headers(
-        stream_id=2,
-        fragment=block,
-        end_stream=true,
-        end_headers=true,
-        priority=None,
-        padding=0,
-      ),
-    )
-    false
-  } catch {
-    _ => true
+  let out = engine.feed(
+    Headers(
+      stream_id=2,
+      fragment=block,
+      end_stream=true,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  assert_eq(out.length(), 1)
+  match out[0] {
+    GoAway(error_code~, ..) => assert_eq(error_code, error_protocol_error)
+    _ => abort("expected GOAWAY")
   }
-  assert_eq(raised, true)
+  assert_eq(engine.closing(), true)
 }
 
 ///|
@@ -480,4 +476,298 @@ test "goaway emits a NO_ERROR GOAWAY carrying the last processed stream id" {
     }
     _ => abort("expected GOAWAY")
   }
+}
+
+// -- RFC 9113 §5.4 fault reporting ------------------------------------------
+
+///|
+/// Drive one complete unary call on stream `id` and return the `grpc-status` it came
+/// back with, so a test can show the connection is still serving after a stream error.
+fn call_once(
+  engine : H2Server,
+  enc : HpackEncoder,
+  dec : HpackDecoder,
+  id : Int,
+  path : Bytes,
+  body : Bytes,
+) -> Bytes raise {
+  let block = enc.encode([{ name: b":path", value: path, }])
+  let _ = engine.feed(
+    Headers(
+      stream_id=id,
+      fragment=block,
+      end_stream=false,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  let out = engine.feed(
+    Data(stream_id=id, data=encode_message(body), end_stream=true, padding=0),
+  )
+  let mut status = b""
+  for f in out {
+    match f {
+      Headers(fragment~, ..) =>
+        for h in dec.decode(fragment) {
+          if h.name == b"grpc-status" {
+            status = h.value
+          }
+        }
+      _ => ()
+    }
+  }
+  status
+}
+
+///|
+test "engine: a zero-increment WINDOW_UPDATE resets that stream and spares the connection" {
+  let engine = H2Server::new()
+  engine.register("/e.E/M", req => concat(b"re:", req))
+  let enc = HpackEncoder::new()
+  let dec = HpackDecoder::new()
+  let _ = engine.feed(Settings(params=[], ack=false))
+  // RFC 9113 §6.9: a zero increment credits nothing, and on a stream it costs only
+  // that stream.
+  let out = engine.feed(WindowUpdate(stream_id=1, increment=0))
+  assert_eq(out.length(), 1)
+  match out[0] {
+    RstStream(stream_id~, error_code~) => {
+      assert_eq(stream_id, 1)
+      assert_eq(error_code, error_protocol_error)
+    }
+    _ => abort("expected RST_STREAM")
+  }
+  assert_eq(engine.closing(), false)
+  // The connection is untouched: a fresh stream runs a call to completion on it.
+  assert_eq(call_once(engine, enc, dec, 3, b"/e.E/M", b"qwq") == b"0", true)
+}
+
+///|
+test "engine: a frame on a finished stream is a stream error, not a connection one" {
+  let engine = H2Server::new()
+  engine.register("/e.E/M", req => req)
+  let enc = HpackEncoder::new()
+  let dec = HpackDecoder::new()
+  let _ = engine.feed(Settings(params=[], ack=false))
+  assert_eq(call_once(engine, enc, dec, 1, b"/e.E/M", b"hhh") == b"0", true)
+  // Stream 1 is closed; §5.1 makes more DATA on it a STREAM_CLOSED stream error.
+  let out = engine.feed(
+    Data(stream_id=1, data=encode_message(b"late"), end_stream=true, padding=0),
+  )
+  assert_eq(out.length(), 1)
+  match out[0] {
+    RstStream(stream_id~, error_code~) => {
+      assert_eq(stream_id, 1)
+      assert_eq(error_code, error_stream_closed)
+    }
+    _ => abort("expected RST_STREAM")
+  }
+  assert_eq(engine.closing(), false)
+  assert_eq(call_once(engine, enc, dec, 3, b"/e.E/M", b"qwq") == b"0", true)
+}
+
+///|
+test "engine: DATA on stream 0 ends the connection with a PROTOCOL_ERROR GOAWAY" {
+  let engine = H2Server::new()
+  engine.register("/e.E/M", req => req)
+  let _ = engine.feed(Settings(params=[], ack=false))
+  let out = engine.feed(
+    Data(stream_id=0, data=b"hhh", end_stream=false, padding=0),
+  )
+  assert_eq(out.length(), 1)
+  match out[0] {
+    GoAway(last_stream_id~, error_code~, debug~) => {
+      assert_eq(last_stream_id, 0)
+      assert_eq(error_code, error_protocol_error)
+      assert_eq(debug == b"DATA on stream 0", true)
+    }
+    _ => abort("expected GOAWAY")
+  }
+  // §5.4.1: the connection is over once the GOAWAY is out, so nothing else runs.
+  assert_eq(engine.closing(), true)
+  assert_eq(engine.feed(Ping(payload=b"heke1228", ack=false)).length(), 0)
+}
+
+///|
+test "engine: a CONTINUATION with no field block open is a connection error" {
+  let engine = H2Server::new()
+  let _ = engine.feed(Settings(params=[], ack=false))
+  // §6.10: nothing left END_HEADERS clear, so there is no block to continue.
+  let out = engine.feed(
+    Continuation(stream_id=1, fragment=b"", end_headers=true),
+  )
+  assert_eq(out.length(), 1)
+  match out[0] {
+    GoAway(error_code~, ..) => assert_eq(error_code, error_protocol_error)
+    _ => abort("expected GOAWAY")
+  }
+  assert_eq(engine.closing(), true)
+}
+
+///|
+test "engine: a WINDOW_UPDATE past the 2^31-1 window ceiling is a FLOW_CONTROL_ERROR" {
+  let engine = H2Server::new()
+  let _ = engine.feed(Settings(params=[], ack=false))
+  // §6.9.1: both windows start at 65535, so 2^31-1 more overflows either one.
+  let stream_out = engine.feed(WindowUpdate(stream_id=1, increment=0x7FFFFFFF))
+  assert_eq(stream_out.length(), 1)
+  match stream_out[0] {
+    RstStream(stream_id~, error_code~) => {
+      assert_eq(stream_id, 1)
+      assert_eq(error_code, error_flow_control_error)
+    }
+    _ => abort("expected RST_STREAM")
+  }
+  let conn_out = engine.feed(WindowUpdate(stream_id=0, increment=0x7FFFFFFF))
+  assert_eq(conn_out.length(), 1)
+  match conn_out[0] {
+    GoAway(error_code~, ..) => assert_eq(error_code, error_flow_control_error)
+    _ => abort("expected GOAWAY")
+  }
+}
+
+///|
+test "engine: a field block that will not decode is a COMPRESSION_ERROR" {
+  let engine = H2Server::new()
+  let _ = engine.feed(Settings(params=[], ack=false))
+  // An indexed field naming index 0 is illegal HPACK (RFC 7541 §6.1). The block never
+  // decodes, so our compression context stops matching the peer's for good.
+  let out = engine.feed(
+    Headers(
+      stream_id=1,
+      fragment=b"",
+      end_stream=true,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  assert_eq(out.length(), 1)
+  match out[0] {
+    GoAway(error_code~, ..) => assert_eq(error_code, error_compression_error)
+    _ => abort("expected GOAWAY")
+  }
+  assert_eq(engine.closing(), true)
+}
+
+///|
+test "engine: a stream opened after our own GOAWAY is refused, not served" {
+  let engine = H2Server::new()
+  engine.register("/e.E/M", req => req)
+  let enc = HpackEncoder::new()
+  let dec = HpackDecoder::new()
+  let _ = engine.feed(Settings(params=[], ack=false))
+  assert_eq(call_once(engine, enc, dec, 1, b"/e.E/M", b"hhh") == b"0", true)
+  // The drain names stream 1 as the last one we will handle.
+  let _ = engine.goaway(engine.highest_stream())
+  let block = enc.encode([{ name: b":path", value: b"/e.E/M", }])
+  let out = engine.feed(
+    Headers(
+      stream_id=3,
+      fragment=block,
+      end_stream=true,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  assert_eq(out.length(), 1)
+  match out[0] {
+    RstStream(stream_id~, error_code~) => {
+      assert_eq(stream_id, 3)
+      // §6.8: it was never processed, so the client is free to re-issue it elsewhere.
+      assert_eq(error_code, error_refused_stream)
+    }
+    _ => abort("expected RST_STREAM")
+  }
+  assert_eq(engine.closing(), false)
+}
+
+///|
+test "engine: a reset stream stops mid-call and sends nothing more" {
+  let engine = H2Server::new()
+  engine.register("/e.E/M", req => concat(b"re:", req))
+  let enc = HpackEncoder::new()
+  let dec = HpackDecoder::new()
+  let _ = engine.feed(Settings(params=[], ack=false))
+  let block = enc.encode([{ name: b":path", value: b"/e.E/M", }])
+  let _ = engine.feed(
+    Headers(
+      stream_id=1,
+      fragment=block,
+      end_stream=false,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  // A window past the ceiling resets stream 1 while the call is still open.
+  let out = engine.feed(WindowUpdate(stream_id=1, increment=0x7FFFFFFF))
+  assert_eq(out.length(), 1)
+  match out[0] {
+    RstStream(stream_id~, error_code~) => {
+      assert_eq(stream_id, 1)
+      assert_eq(error_code, error_flow_control_error)
+    }
+    _ => abort("expected RST_STREAM")
+  }
+  // §5.4.2: the reset closed the stream, so the request that finishes arriving after
+  // it earns another reset — never the response the handler would have produced.
+  assert_eq(engine.stream_state(1), Closed)
+  let late = engine.feed(
+    Data(stream_id=1, data=encode_message(b"qwq"), end_stream=true, padding=0),
+  )
+  assert_eq(late.length(), 1)
+  match late[0] {
+    RstStream(stream_id~, error_code~) => {
+      assert_eq(stream_id, 1)
+      assert_eq(error_code, error_stream_closed)
+    }
+    _ => abort("expected RST_STREAM")
+  }
+  assert_eq(engine.closing(), false)
+  assert_eq(call_once(engine, enc, dec, 3, b"/e.E/M", b"hhh") == b"0", true)
+}
+
+///|
+/// A peer's RST_STREAM has to clear the half-read header block, not just mark the
+/// stream closed. A CONTINUATION arriving afterwards is the peer's protocol error —
+/// it is continuing a block on a stream it just reset — and blaming ourselves with
+/// INTERNAL_ERROR would send the wrong diagnostic to the wrong side.
+test "a peer's RST_STREAM abandons the header block it was in the middle of" {
+  let e = H2Server::new()
+  e.register("/echo.E/Say", req => req)
+  let enc = HpackEncoder::new()
+  let block = enc.encode([
+    { name: b":method", value: b"POST", },
+    { name: b":scheme", value: b"http", },
+    { name: b":path", value: b"/echo.E/Say", },
+    { name: b"content-type", value: b"application/grpc", },
+  ])
+  let _ = e.feed(Settings(params=[], ack=false))
+  // Open a block and deliberately leave it open.
+  let _ = e.feed(
+    Headers(
+      stream_id=1,
+      fragment=block,
+      end_stream=false,
+      end_headers=false,
+      priority=None,
+      padding=0,
+    ),
+  )
+  let _ = e.feed(RstStream(stream_id=1, error_code=error_cancel))
+  assert_eq(e.stream_state(1), StreamState::Closed)
+  // Continuing the abandoned block is the peer's fault, and the GOAWAY has to say so.
+  let after = e.feed(
+    Continuation(stream_id=1, fragment=block, end_headers=true),
+  )
+  let mut code = -1
+  for f in after {
+    if f is GoAway(error_code~, ..) {
+      code = error_code
+    }
+  }
+  assert_eq(code, error_protocol_error)
 }

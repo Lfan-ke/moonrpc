@@ -424,11 +424,14 @@ pub struct H2Server {
   mut remote_max_frame : Int
   mut goaway_received : Bool
   mut last_client_stream : Int
+  mut closing : Bool
+  mut drained : Int?
 }
 pub fn H2Server::active_streams(Self) -> Int
 pub fn H2Server::add_stream_interceptor(Self, (RpcContext, Bytes, (RpcContext, Bytes) -> Array[Bytes]) -> Array[Bytes]) -> Unit
 pub fn H2Server::add_unary_interceptor(Self, (RpcContext, Bytes, (RpcContext, Bytes) -> Bytes) -> Bytes) -> Unit
-pub fn H2Server::feed(Self, Frame) -> Array[Frame] raise
+pub fn H2Server::closing(Self) -> Bool
+pub fn H2Server::feed(Self, Frame) -> Array[Frame]
 pub fn H2Server::goaway(Self, Int) -> Array[Frame]
 pub fn H2Server::goaway_received(Self) -> Bool
 pub fn H2Server::highest_stream(Self) -> Int
@@ -673,6 +676,7 @@ pub(all) struct SrvStream {
   req_msgs : Array[Bytes]
   mut bidi_processed : Int
   mut headers_complete : Bool
+  mut in_headers : Bool
   mut end_stream_recv : Bool
   mut path : String
   mut ctx : RpcContext
@@ -715,6 +719,8 @@ pub(all) enum Status {
   Unauthenticated
 } derive(Eq)
 pub fn Status::code(Self) -> Int
+pub fn Status::from_h2_error(Int) -> Self
+pub fn Status::from_http(Int) -> Self
 pub fn Status::name(Self) -> String
 
 pub(all) struct Stream {

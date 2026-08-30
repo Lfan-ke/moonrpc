@@ -34,8 +34,8 @@ async fn write_frames(
 /// Drive one accepted h2c connection to completion: validate the client
 /// connection preface, send the server SETTINGS, then loop — read a frame, feed it
 /// to the engine, write back whatever the engine produces — until the peer closes
-/// the connection, a GOAWAY is seen, or the server is shutting down and this
-/// connection has finished its last call.
+/// the connection, a GOAWAY is seen, the engine reports a connection error, or the
+/// server is shutting down and this connection has finished its last call.
 async fn drive(
   conn : @socket.Tcp,
   engine : @moonrpc.H2Server,
@@ -48,7 +48,13 @@ async fn drive(
   write_frames(conn, engine.preface())
   for ;; {
     let frame = read_frame(conn)
+    // Whatever the engine hands back goes out first, RST_STREAM and GOAWAY included:
+    // a connection error is only closed *after* the peer has been told why
+    // (RFC 9113 §5.4.1).
     write_frames(conn, engine.feed(frame))
+    if engine.closing() {
+      break
+    }
     if engine.goaway_received() {
       break
     }

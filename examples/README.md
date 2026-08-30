@@ -37,6 +37,7 @@ moon run examples/07-unary-call
 | 23 | [`connectivity-lb`](23-connectivity-lb/) | Sub-connection connectivity states and a connection pool picking a READY backend under `pick_first` / `round_robin` |
 | 24 | [`dns-resolver`](24-dns-resolver/) | The DNS codec (RFC 1035): encode an A query, decode a response with A/AAAA records and a compression pointer, read the addresses |
 | 25 | [`goaway-shutdown`](25-goaway-shutdown/) | Graceful shutdown with GOAWAY: the last-processed stream id, retryable detection for higher streams, and refusing new streams |
+| 26 | [`protocol-errors`](26-protocol-errors/) | RFC 9113 §5.4 fault scope: a stream error answered with RST_STREAM while the connection serves on, a connection error answered with GOAWAY, and the statuses a client builds from a call that ends without trailers |
 
 Everything here is pure and runs on every backend (`moon check --target all`); the native
 `@net.Channel` and `@net.GrpcServer` drive these same codecs over a real socket.

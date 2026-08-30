@@ -458,9 +458,17 @@ pub fn H2Client::feed(self : H2Client, frame : Frame) -> Array[Frame] raise {
         }
         None => []
       }
-    RstStream(stream_id~, ..) => {
+    RstStream(stream_id~, error_code~) => {
       match self.calls.get(stream_id) {
-        Some(c) => c.done = true
+        Some(c) => {
+          c.done = true
+          // A reset ends the call with no trailers, so the only thing left to build a
+          // status from is the HTTP/2 error code. A `grpc-status` that already arrived
+          // is the server's own word and outranks it.
+          if c.grpc_status is None {
+            c.grpc_status = Some(Status::from_h2_error(error_code).code())
+          }
+        }
         None => ()
       }
       []
@@ -669,7 +677,17 @@ pub fn H2Client::reply(self : H2Client, id : Int) -> CallReply {
       } else {
         match c.grpc_status {
           Some(v) => v
-          None => -1
+          // No `grpc-status` anywhere. A non-200 `:status` is an HTTP-level refusal —
+          // a proxy or a plain HTTP server — and carries the status itself; a 200 with
+          // no trailer is a broken server, and `-1` keeps saying the peer never told us.
+          None => {
+            let http = ascii_bytes_to_int(c.status)
+            if c.status.length() == 0 || http == 200 {
+              -1
+            } else {
+              Status::from_http(http).code()
+            }
+          }
         }
       }
       {

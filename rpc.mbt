@@ -119,6 +119,41 @@ pub fn Status::name(self : Status) -> String {
 }
 
 ///|
+/// The status a call ends with when the peer resets its stream instead of sending
+/// trailers, from the RST_STREAM error code (gRPC PROTOCOL-HTTP2, "HTTP2 Error Code →
+/// Status"). A refused stream was never processed, so it is UNAVAILABLE and safe to
+/// retry; anything the table does not name is INTERNAL, since the peer broke the
+/// transport rather than the call.
+pub fn Status::from_h2_error(code : Int) -> Status {
+  if code == error_refused_stream {
+    Unavailable
+  } else if code == error_enhance_your_calm {
+    ResourceExhausted
+  } else if code == error_inadequate_security {
+    PermissionDenied
+  } else if code == error_cancel {
+    Cancelled
+  } else {
+    Internal
+  }
+}
+
+///|
+/// The status a non-200 HTTP response maps to when it carries no `grpc-status` — a
+/// proxy or a plain HTTP server answering on the gRPC port (gRPC
+/// http-grpc-status-mapping). Anything outside the table is UNKNOWN.
+pub fn Status::from_http(code : Int) -> Status {
+  match code {
+    400 => Internal
+    401 => Unauthenticated
+    403 => PermissionDenied
+    404 => Unimplemented
+    429 | 502 | 503 | 504 => Unavailable
+    _ => Unknown
+  }
+}
+
+///|
 /// A fully-qualified RPC method: `package.Service` and the method name.
 pub(all) struct Method {
   service : String
