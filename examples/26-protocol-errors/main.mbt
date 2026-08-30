@@ -23,10 +23,17 @@ fn open_call(
   id : Int,
   end_stream : Bool,
 ) -> Array[@moonrpc.Frame] {
+  let block = enc.encode([
+    { name: b":method", value: b"POST", },
+    { name: b":scheme", value: b"http", },
+    { name: b":path", value: b"/echo.Echo/Say", },
+    { name: b"content-type", value: b"application/grpc", },
+    { name: b"te", value: b"trailers", },
+  ])
   server.feed(
     Headers(
       stream_id=id,
-      fragment=enc.encode([{ name: b":path", value: b"/echo.Echo/Say", }]),
+      fragment=block,
       end_stream~,
       end_headers=true,
       priority=None,

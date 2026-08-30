@@ -267,8 +267,10 @@ test "metadata and grpc-timeout deadline are surfaced to the handler" {
   })
   let enc = HpackEncoder::new()
   let block = enc.encode([
+    { name: b":method", value: b"POST", },
     { name: b":path", value: b"/meta.M/Echo", },
     { name: b"content-type", value: b"application/grpc", },
+    { name: b"te", value: b"trailers", },
     { name: b"grpc-timeout", value: b"2S", },
     { name: b"x-token", value: b"secret", },
   ])

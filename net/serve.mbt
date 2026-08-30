@@ -52,6 +52,10 @@ async fn drive(
     // a connection error is only closed *after* the peer has been told why
     // (RFC 9113 §5.4.1).
     write_frames(conn, engine.feed(frame))
+    // A call that has been waiting on this connection may have run out of time while we
+    // were parked in `read_frame`. This driver only notices when traffic arrives, so a
+    // connection that goes silent holds its expired calls until it says something.
+    write_frames(conn, engine.tick())
     if engine.closing() {
       break
     }
@@ -164,6 +168,9 @@ pub fn GrpcServer::register_reflection(
 /// Build a fresh per-connection engine seeded with this server's handlers.
 fn GrpcServer::engine(self : GrpcServer) -> @moonrpc.H2Server {
   let e = @moonrpc.H2Server::new()
+  // The engine is pure and has no clock, so `grpc-timeout` deadlines only mean anything
+  // once one is handed to it.
+  e.set_clock(() => @async.now())
   for path, handler in self.handlers {
     e.register_handler(path, handler)
   }
@@ -785,6 +792,150 @@ async test "graceful_stop lets a call that is already open finish" {
     assert_eq(message == b"echo:hhh", true)
     conn.close()
     drain.wait()
+    task.cancel()
+  })
+}
+
+///|
+/// Open a call carrying `timeout` as its `grpc-timeout`, let `delay` milliseconds of
+/// real time pass before finishing the request, and return the `grpc-status` the server
+/// answered with. The time is spent by the client, not by a handler: handlers are
+/// synchronous, so the only way to spend real time inside a call is to be slow sending
+/// it — which is also the shape of the deadline a real client hits.
+async fn timed_call(port : Int, timeout : Bytes, delay : Int) -> Bytes {
+  let conn = @socket.Tcp::connect(
+    @socket.Addr::parse("127.0.0.1:" + port.to_string()),
+  )
+  conn.write(@moonrpc.connection_preface)
+  conn.write(@moonrpc.Frame::Settings(params=[], ack=false).encode())
+  let enc = @moonrpc.HpackEncoder::new()
+  let block = enc.encode([
+    { name: b":method", value: b"POST", },
+    { name: b":scheme", value: b"http", },
+    { name: b":path", value: b"/slow.S/Wait", },
+    { name: b":authority", value: b"127.0.0.1", },
+    { name: b"content-type", value: b"application/grpc", },
+    { name: b"te", value: b"trailers", },
+    { name: b"grpc-timeout", value: timeout, },
+  ])
+  conn.write(
+    @moonrpc.Frame::Headers(
+      stream_id=1,
+      fragment=block,
+      end_stream=false,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ).encode(),
+  )
+  @async.sleep(delay)
+  conn.write(
+    @moonrpc.Frame::Data(
+      stream_id=1,
+      data=@moonrpc.encode_message(b"qwq"),
+      end_stream=true,
+      padding=0,
+    ).encode(),
+  )
+  let dec = @moonrpc.HpackDecoder::new()
+  let mut grpc_status = b""
+  let mut done = false
+  while !done {
+    match read_frame(conn) {
+      Settings(ack~, ..) =>
+        if !ack {
+          conn.write(@moonrpc.Frame::Settings(params=[], ack=true).encode())
+        }
+      Headers(fragment~, end_stream~, ..) => {
+        for h in dec.decode(fragment) {
+          if h.name == b"grpc-status" {
+            grpc_status = h.value
+          }
+        }
+        if end_stream {
+          done = true
+        }
+      }
+      _ => ()
+    }
+  }
+  conn.close()
+  grpc_status
+}
+
+///|
+async test "a call whose deadline passes on the wire is answered DEADLINE_EXCEEDED" {
+  @async.with_task_group(g => {
+    let server = GrpcServer::new()
+    server.register("/slow.S/Wait", req => req)
+    let task = g.spawn(() => server.serve(port=18078))
+    @async.sleep(300)
+    // 50 ms of deadline, and 250 ms before the request finishes arriving: the engine
+    // reads the driver's clock, so the call is over before the handler could run.
+    assert_eq(timed_call(18078, b"50m", 250) == b"4", true)
+    // The same call inside its deadline is served as usual.
+    assert_eq(timed_call(18078, b"10S", 0) == b"0", true)
+    task.cancel()
+  })
+}
+
+///|
+async test "a call left waiting past its deadline is cut off when the connection next speaks" {
+  @async.with_task_group(g => {
+    let server = GrpcServer::new()
+    server.register_client_streaming("/slow.S/Collect", (_ctx, _msgs) => b"done")
+    let task = g.spawn(() => server.serve(port=18080))
+    @async.sleep(300)
+    let conn = @socket.Tcp::connect(@socket.Addr::parse("127.0.0.1:18080"))
+    conn.write(@moonrpc.connection_preface)
+    conn.write(@moonrpc.Frame::Settings(params=[], ack=false).encode())
+    let enc = @moonrpc.HpackEncoder::new()
+    let block = enc.encode([
+      { name: b":method", value: b"POST", },
+      { name: b":scheme", value: b"http", },
+      { name: b":path", value: b"/slow.S/Collect", },
+      { name: b":authority", value: b"127.0.0.1", },
+      { name: b"content-type", value: b"application/grpc", },
+      { name: b"te", value: b"trailers", },
+      { name: b"grpc-timeout", value: b"50m", },
+    ])
+    // Open the call and then go quiet: nothing else will ever arrive for this stream.
+    conn.write(
+      @moonrpc.Frame::Headers(
+        stream_id=1,
+        fragment=block,
+        end_stream=false,
+        end_headers=true,
+        priority=None,
+        padding=0,
+      ).encode(),
+    )
+    @async.sleep(250)
+    // Two PINGs the call has nothing to do with. The driver takes each one as its cue to
+    // look at the clock, so the expired call is cut off between the two answers.
+    conn.write(@moonrpc.Frame::Ping(payload=b"heke1228", ack=false).encode())
+    conn.write(@moonrpc.Frame::Ping(payload=b"lfanke00", ack=false).encode())
+    let dec = @moonrpc.HpackDecoder::new()
+    let mut grpc_status = b""
+    let mut acks = 0
+    while acks < 2 {
+      match read_frame(conn) {
+        Ping(ack~, ..) => if ack { acks = acks + 1 }
+        Settings(ack~, ..) =>
+          if !ack {
+            conn.write(@moonrpc.Frame::Settings(params=[], ack=true).encode())
+          }
+        Headers(fragment~, ..) =>
+          for h in dec.decode(fragment) {
+            if h.name == b"grpc-status" {
+              grpc_status = h.value
+            }
+          }
+        _ => ()
+      }
+    }
+    assert_eq(grpc_status == b"4", true)
+    conn.close()
     task.cancel()
   })
 }

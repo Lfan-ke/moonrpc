@@ -18,6 +18,14 @@ pub let default_window_size : Int = 65535
 pub let default_max_frame_size : Int = 16384
 
 ///|
+/// The `SETTINGS_MAX_CONCURRENT_STREAMS` the server advertises and enforces unless a
+/// caller says otherwise: 100, the value gRPC and nghttp2 both settle on. RFC 9113
+/// §5.1.2 leaves the setting unset by default, which means unbounded — and every live
+/// stream holds a request buffer, so a peer that opens streams and never finishes them
+/// pins memory for as long as the connection lasts.
+pub let default_max_streams : Int = 100
+
+///|
 /// Add a flow-control increment to a window, saturating at the ±2^31-1 range RFC 7540
 /// §6.9.1 allows instead of wrapping. A wrap to a large negative window would stall
 /// every send on that stream/connection (a WINDOW_UPDATE-driven deadlock), and a wrap
@@ -70,6 +78,9 @@ pub(all) struct SrvStream {
   mut end_stream_recv : Bool
   mut path : String
   mut ctx : RpcContext
+  // When the call's `grpc-timeout` runs out, on the clock the driver installed. `None`
+  // when the request carried no timeout.
+  mut deadline_at : Int64?
   mut recv_window : Int
   mut send_window : Int
   mut out : Bytes
@@ -79,6 +90,10 @@ pub(all) struct SrvStream {
   mut response_ended : Bool
   mut finalized : Bool
   mut trailers_only : Bool
+  // The `:status` of the response. A gRPC call is always 200 and carries its outcome in
+  // `grpc-status`; a request that is not a gRPC call at all is answered with a real HTTP
+  // status instead, so a plain HTTP client cannot read the refusal as a success.
+  mut http_status : Int
   mut status_code : Int
   mut status_message : String
   // The call's `grpc-encoding` (empty when absent, i.e. identity). A compressed
@@ -113,6 +128,7 @@ fn SrvStream::new(id : Int, send_window : Int) -> SrvStream {
     end_stream_recv: false,
     path: "",
     ctx: RpcContext::empty(),
+    deadline_at: None,
     recv_window: default_window_size,
     send_window,
     out: b"",
@@ -122,6 +138,7 @@ fn SrvStream::new(id : Int, send_window : Int) -> SrvStream {
     response_ended: false,
     finalized: false,
     trailers_only: false,
+    http_status: 200,
     status_code: 0,
     status_message: "",
     req_encoding: b"",
@@ -165,6 +182,16 @@ pub struct H2Server {
   mut conn_send_window : Int
   mut remote_initial_window : Int
   mut remote_max_frame : Int
+  // How many streams this connection runs at once: what `preface` advertises as
+  // SETTINGS_MAX_CONCURRENT_STREAMS and what a new HEADERS is measured against.
+  mut max_streams : Int
+  // What the engine reads to tell whether a deadline has passed. Pure by default —
+  // there is no clock a wasm build can read — so a driver installs a real one.
+  mut clock : () -> Int64
+  // The stream whose field block is still open, i.e. the one a CONTINUATION must
+  // continue. §6.10 makes a field block a contiguous run of frames, so while this is
+  // set nothing else may arrive on any stream.
+  mut continuing : Int?
   mut goaway_received : Bool
   // The highest client stream id opened so far. A new HEADERS must use an odd id
   // strictly greater than this (RFC 7540 §5.1.1); anything else is a PROTOCOL_ERROR.
@@ -193,6 +220,9 @@ pub fn H2Server::new() -> H2Server {
     conn_send_window: default_window_size,
     remote_initial_window: default_window_size,
     remote_max_frame: default_max_frame_size,
+    max_streams: default_max_streams,
+    clock: () => 0L,
+    continuing: None,
     goaway_received: false,
     last_client_stream: 0,
     closing: false,
@@ -283,12 +313,36 @@ pub fn H2Server::goaway_received(self : H2Server) -> Bool {
 }
 
 ///|
-/// The server's opening frames (RFC 7540 §3.5): a SETTINGS frame disabling server
-/// push. Sent immediately after the client connection preface is validated, before
-/// any request frame is read.
+/// The server's opening frames (RFC 7540 §3.5): a SETTINGS frame disabling server push
+/// and naming how many streams this connection will run at once. Sent immediately after
+/// the client connection preface is validated, before any request frame is read.
 pub fn H2Server::preface(self : H2Server) -> Array[Frame] {
-  ignore(self)
-  [Settings(params=[(settings_enable_push, 0)], ack=false)]
+  [
+    Settings(
+      params=[
+        (settings_enable_push, 0),
+        (settings_max_concurrent_streams, self.max_streams),
+      ],
+      ack=false,
+    ),
+  ]
+}
+
+///|
+/// Set how many streams this connection may run at once. The value is both advertised
+/// as `SETTINGS_MAX_CONCURRENT_STREAMS` and enforced on arrival, so set it before
+/// `preface` and the peer is told exactly what it will be held to.
+pub fn H2Server::set_max_streams(self : H2Server, n : Int) -> Unit {
+  self.max_streams = n
+}
+
+///|
+/// Install the clock the engine measures `grpc-timeout` deadlines against: a function
+/// returning the current time in milliseconds on any monotonic scale. The engine is a
+/// pure state machine with no clock of its own, so until one is installed every
+/// deadline is inert; the native driver installs `@async.now`.
+pub fn H2Server::set_clock(self : H2Server, clock : () -> Int64) -> Unit {
+  self.clock = clock
 }
 
 ///|
@@ -467,6 +521,51 @@ fn header_value(headers : Array[Header], name : Bytes) -> Bytes? {
 }
 
 ///|
+/// Whether `b` begins with `prefix`.
+fn starts_with(b : Bytes, prefix : Bytes) -> Bool {
+  if b.length() < prefix.length() {
+    return false
+  }
+  for i = 0; i < prefix.length(); i = i + 1 {
+    if b[i] != prefix[i] {
+      return false
+    }
+  }
+  true
+}
+
+///|
+/// How to refuse a request that is not a gRPC call — the HTTP `:status` to answer with,
+/// the `grpc-status` to pair with it, and why — or `None` when it is one. gRPC
+/// PROTOCOL-HTTP2 fixes the request line: `:method` is POST, `te` carries `trailers`,
+/// and `content-type` begins `application/grpc`. The content-type check is the one the
+/// spec gives a status of its own (415), and it is the load-bearing one: without it a
+/// browser form post or a health-checking GET is dispatched as a call and answered
+/// 200 + `grpc-status`, which every non-gRPC client reads as success.
+fn request_reject(headers : Array[Header]) -> (Int, Int, String)? {
+  match header_value(headers, b"content-type") {
+    Some(ct) if starts_with(ct, b"application/grpc") => ()
+    _ =>
+      return Some(
+        (
+          415,
+          Status::code(InvalidArgument),
+          "content-type is not application/grpc",
+        ),
+      )
+  }
+  match header_value(headers, b":method") {
+    Some(m) if m == b"POST" => ()
+    _ => return Some((405, Status::code(Internal), ":method is not POST"))
+  }
+  match header_value(headers, b"te") {
+    Some(te) if te == b"trailers" => ()
+    _ => return Some((400, Status::code(Internal), "te: trailers is missing"))
+  }
+  None
+}
+
+///|
 /// Whether a request header is a pseudo-header (`:`-prefixed) or a reserved gRPC/
 /// HTTP header, and so is *not* surfaced as call metadata (RFC 7540 §8.1.2.1 plus
 /// the gRPC HTTP/2 mapping).
@@ -583,17 +682,24 @@ fn H2Server::apply_setting(self : H2Server, id : Int, value : Int) -> Unit {
 }
 
 ///|
-/// Emit connection- and stream-level WINDOW_UPDATE frames when a receive window
-/// has fallen below half the default, replenishing it to the default (a simple,
-/// correct auto-tuning policy; RFC 7540 §6.9).
-fn H2Server::replenish(self : H2Server, s : SrvStream) -> Array[Frame] {
-  let frames : Array[Frame] = []
-  let threshold = default_window_size / 2
-  if self.conn_recv_window < threshold {
+/// Emit a connection-level WINDOW_UPDATE when the connection receive window has fallen
+/// below half the default, replenishing it to the default (a simple, correct
+/// auto-tuning policy; RFC 7540 §6.9).
+fn H2Server::credit_conn(self : H2Server) -> Array[Frame] {
+  if self.conn_recv_window < default_window_size / 2 {
     let inc = default_window_size - self.conn_recv_window
     self.conn_recv_window = self.conn_recv_window + inc
-    frames.push(WindowUpdate(stream_id=0, increment=inc))
+    return [WindowUpdate(stream_id=0, increment=inc)]
   }
+  []
+}
+
+///|
+/// Emit connection- and stream-level WINDOW_UPDATE frames when a receive window
+/// has fallen below half the default, replenishing it to the default.
+fn H2Server::replenish(self : H2Server, s : SrvStream) -> Array[Frame] {
+  let frames = self.credit_conn()
+  let threshold = default_window_size / 2
   if s.recv_window < threshold {
     let inc = default_window_size - s.recv_window
     s.recv_window = s.recv_window + inc
@@ -615,19 +721,115 @@ pub fn H2Server::feed(self : H2Server, frame : Frame) -> Array[Frame] {
     return []
   }
   self.step(frame) catch {
-    f => {
-      match f {
-        ConnFault(..) => self.closing = true
-        // The RST_STREAM about to go out closes the stream, so the response the
-        // handler may already have queued on it must not follow it onto the wire.
-        StreamFault(id~, ..) =>
-          if self.streams.get(id) is Some(s) {
-            s.retire()
-          }
+    f => self.report(f)
+  }
+}
+
+///|
+/// Turn a fault into the frames that report it and leave the engine in the state that
+/// report implies. A stream error also hands back the connection-window credit the dead
+/// stream's octets were counted against: the peer spent them on a window it shares with
+/// every other stream, and a connection that never returns them stalls a window's worth
+/// at a time.
+fn H2Server::report(self : H2Server, f : H2Fault) -> Array[Frame] {
+  let frames : Array[Frame] = []
+  match f {
+    ConnFault(..) => self.closing = true
+    // The RST_STREAM about to go out closes the stream, so the response the handler
+    // may already have queued on it must not follow it onto the wire.
+    StreamFault(id~, ..) => {
+      if self.streams.get(id) is Some(s) {
+        s.retire()
       }
-      fault_frames(f, self.last_client_stream)
+      for g in self.credit_conn() {
+        frames.push(g)
+      }
     }
   }
+  for g in fault_frames(f, self.last_client_stream) {
+    frames.push(g)
+  }
+  frames
+}
+
+///|
+/// Expire every call whose deadline has passed, returning the frames that end them.
+/// The driver calls this on whatever schedule it keeps time on; the engine also checks
+/// the deadline whenever a stream advances, so a call that is making progress never
+/// needs a tick to be cut off.
+pub fn H2Server::tick(self : H2Server) -> Array[Frame] {
+  if self.closing {
+    return []
+  }
+  self.sweep() catch {
+    f => self.report(f)
+  }
+}
+
+///|
+/// Whether this stream's deadline has passed on the installed clock.
+fn H2Server::past_deadline(self : H2Server, s : SrvStream) -> Bool {
+  match s.deadline_at {
+    Some(t) => (self.clock)() >= t
+    None => false
+  }
+}
+
+///|
+/// End a call whose deadline has passed with DEADLINE_EXCEEDED — the status gRPC's
+/// table has both ends generate. Anything the handler produced after the deadline goes
+/// no further: the client has stopped waiting for it. A client still sending gets a
+/// RST_STREAM too, since trailers alone leave the stream half-open and the peer free to
+/// go on filling buffers for a call that is over.
+fn H2Server::expire(
+  self : H2Server,
+  s : SrvStream,
+) -> Array[Frame] raise H2Fault {
+  s.out = b""
+  s.out_off = 0
+  s.status_code = Status::code(DeadlineExceeded)
+  s.status_message = "deadline exceeded"
+  if !s.headers_sent {
+    s.trailers_only = true
+  }
+  s.started = true
+  s.finalized = true
+  s.response_ended = true
+  let frames = self.produce(s)
+  if !s.end_stream_recv {
+    frames.push(RstStream(stream_id=s.id, error_code=error_no_error))
+    s.retire()
+  }
+  frames
+}
+
+///|
+/// Close out every stream whose deadline has passed. A stream that has already sent its
+/// status is finished and out of the deadline's reach, whatever its state says.
+fn H2Server::sweep(self : H2Server) -> Array[Frame] raise H2Fault {
+  let frames : Array[Frame] = []
+  for _, s in self.streams {
+    if !(s.state is Closed) && !s.trailers_sent && self.past_deadline(s) {
+      for f in self.expire(s) {
+        frames.push(f)
+      }
+    }
+  }
+  frames
+}
+
+///|
+/// Emit what a stream can send right now — or, once its deadline has passed, the frames
+/// that end it instead. Every path that pushes a stream forward from outside `advance`
+/// goes through here, so a WINDOW_UPDATE cannot nudge a call along after it is over.
+fn H2Server::flush(
+  self : H2Server,
+  s : SrvStream,
+) -> Array[Frame] raise H2Fault {
+  if !s.trailers_sent && self.past_deadline(s) {
+    return self.expire(s)
+  }
+  self.produce(s)
 }
 
 ///|
@@ -651,6 +853,21 @@ fn send_event(s : SrvStream, ev : StreamEvent) -> StreamState raise H2Fault {
 /// The frame-processing core. Everything that can go wrong is classified into an
 /// `H2Fault`, which `feed` turns into the frames that report it.
 fn H2Server::step(self : H2Server, frame : Frame) -> Array[Frame] raise H2Fault {
+  // §6.10: a field block is a contiguous run of HEADERS then CONTINUATION. Nothing may
+  // be interleaved into it — not a frame on another stream, not one on this one — so
+  // while a block is open the only frame that can be processed is its continuation.
+  if self.continuing is Some(id) {
+    let continues = match frame {
+      Continuation(stream_id~, ..) => stream_id == id
+      _ => false
+    }
+    if !continues {
+      raise ConnFault(
+        code=error_protocol_error,
+        why="frame interleaved into an open field block",
+      )
+    }
+  }
   match frame {
     Settings(params~, ack~) =>
       if ack {
@@ -722,6 +939,16 @@ fn H2Server::step(self : H2Server, frame : Frame) -> Array[Frame] raise H2Fault 
             )
           _ => ()
         }
+        // §5.1.2: the peer was told how many streams it may run at once, and one over
+        // that is refused rather than served — REFUSED_STREAM says it was never
+        // processed, so the client is free to re-issue it on another connection.
+        if self.active_streams() >= self.max_streams {
+          raise StreamFault(
+            id=stream_id,
+            code=error_refused_stream,
+            why="over SETTINGS_MAX_CONCURRENT_STREAMS",
+          )
+        }
         self.last_client_stream = stream_id
       }
       let s = self.stream(stream_id)
@@ -735,6 +962,7 @@ fn H2Server::step(self : H2Server, frame : Frame) -> Array[Frame] raise H2Fault 
         self.complete_headers(s)
       } else {
         s.in_headers = true
+        self.continuing = Some(stream_id)
       }
       self.advance(s)
     }
@@ -759,6 +987,7 @@ fn H2Server::step(self : H2Server, frame : Frame) -> Array[Frame] raise H2Fault 
       s.header_block.write_bytes(fragment)
       guard_header_size(s.header_block)
       if end_headers {
+        self.continuing = None
         self.complete_headers(s)
       }
       self.advance(s)
@@ -768,11 +997,29 @@ fn H2Server::step(self : H2Server, frame : Frame) -> Array[Frame] raise H2Fault 
       if stream_id == 0 {
         raise ConnFault(code=error_protocol_error, why="DATA on stream 0")
       }
-      let s = self.stream(stream_id)
-      s.state = recv_event(s, Data(end_stream~))
+      // §6.9.1: the octets count against the connection window whatever becomes of the
+      // stream, so this is charged before anything can refuse the frame — the peer has
+      // already spent them, and a frame we go on to reject is credited back rather than
+      // never counted at all. Overrunning the window we advertised is the one thing
+      // that cannot be absorbed: it means the peer is not doing flow control.
       let flow_len = data.length() + padding + (if padding > 0 { 1 } else { 0 })
       self.conn_recv_window = self.conn_recv_window - flow_len
+      if self.conn_recv_window < 0 {
+        raise ConnFault(
+          code=error_flow_control_error,
+          why="DATA past the connection receive window",
+        )
+      }
+      let s = self.stream(stream_id)
+      s.state = recv_event(s, Data(end_stream~))
       s.recv_window = s.recv_window - flow_len
+      if s.recv_window < 0 {
+        raise StreamFault(
+          id=stream_id,
+          code=error_flow_control_error,
+          why="DATA past the stream receive window",
+        )
+      }
       s.data.write_bytes(data)
       if end_stream {
         s.end_stream_recv = true
@@ -819,6 +1066,19 @@ fn H2Server::complete_headers(
     Some(p) => bytes_to_ascii(p)
     None => ""
   }
+  s.headers_complete = true
+  s.in_headers = false
+  // Not a gRPC request at all: it is answered on the spot with an HTTP status, and no
+  // handler is ever resolved for it.
+  if request_reject(headers) is Some((http, code, why)) {
+    s.http_status = http
+    s.status_code = code
+    s.status_message = why
+    s.trailers_only = true
+    s.started = true
+    s.response_ended = true
+    return
+  }
   let metadata : Array[Header] = []
   for h in headers {
     if !is_reserved_header(h.name) {
@@ -831,6 +1091,10 @@ fn H2Server::complete_headers(
   }
   let deadline = match header_value(headers, b"grpc-timeout") {
     Some(v) => parse_grpc_timeout(v)
+    None => None
+  }
+  s.deadline_at = match deadline {
+    Some(d) => Some((self.clock)() + d.to_int64())
     None => None
   }
   s.req_encoding = match header_value(headers, b"grpc-encoding") {
@@ -846,8 +1110,6 @@ fn H2Server::complete_headers(
     status_fail: None,
     error_details: [],
   }
-  s.headers_complete = true
-  s.in_headers = false
 }
 
 ///|
@@ -874,6 +1136,11 @@ fn H2Server::advance(
         s.response_ended = true
       }
     }
+  }
+  // The call ran out of time before this frame arrived, so whatever it carries is for a
+  // call that is already over.
+  if !s.trailers_sent && self.past_deadline(s) {
+    return self.expire(s)
   }
   if !s.trailers_only {
     drain_messages(s)
@@ -914,6 +1181,11 @@ fn H2Server::advance(
     if s.end_stream_recv && !s.finalized {
       s.finalized = true
       self.finalize(s)
+      // The handler had the whole call to itself and may have spent more of it than the
+      // deadline allowed; its reply is no more sendable than one produced after a tick.
+      if self.past_deadline(s) {
+        return self.expire(s)
+      }
     }
   }
   self.produce(s)
@@ -995,7 +1267,7 @@ fn H2Server::produce(
   if s.trailers_only {
     if !s.trailers_sent {
       let tr : Array[Header] = [
-        { name: b":status", value: b"200", },
+        { name: b":status", value: int_to_ascii_bytes(s.http_status), },
         { name: b"content-type", value: b"application/grpc", },
         { name: b"grpc-accept-encoding", value: b"identity,gzip", },
         { name: b"grpc-status", value: int_to_ascii_bytes(s.status_code), },
@@ -1123,7 +1395,7 @@ fn H2Server::pump_all(self : H2Server) -> Array[Frame] raise H2Fault {
     // A stream we reset, or the peer did, sends nothing more — asking it to would be
     // a send from `Closed`, i.e. our own state machine refusing us.
     if s.started && !s.trailers_sent && !(s.state is Closed) {
-      for f in self.produce(s) {
+      for f in self.flush(s) {
         frames.push(f)
       }
     }
@@ -1139,14 +1411,18 @@ pub fn H2Server::highest_stream(self : H2Server) -> Int {
 }
 
 ///|
-/// How many streams are still running. A graceful shutdown waits for this to reach
-/// zero before closing the connection; finished streams stay in the map with their
-/// state but are not counted.
+/// How many streams are still running: the ones RFC 9113 §5.1.2 counts against
+/// `SETTINGS_MAX_CONCURRENT_STREAMS`, which is `open` and both `half-closed` states. A
+/// graceful shutdown waits for this to reach zero before closing the connection.
+/// Finished streams stay in the map with their state but are not counted, and neither
+/// is one the engine only knows of because a WINDOW_UPDATE named it — that stream was
+/// never opened, so it holds nothing and occupies no slot.
 pub fn H2Server::active_streams(self : H2Server) -> Int {
   let mut n = 0
   for _id, s in self.streams {
-    if !(s.state is Closed) {
-      n = n + 1
+    match s.state {
+      Open | HalfClosedLocal | HalfClosedRemote => n = n + 1
+      _ => ()
     }
   }
   n

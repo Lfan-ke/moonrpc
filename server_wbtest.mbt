@@ -11,6 +11,29 @@ fn concat(a : Bytes, b : Bytes) -> Bytes {
 }
 
 ///|
+/// A well-formed gRPC request header block: the pseudo-headers, `content-type` and `te`
+/// the server insists on, plus whatever the test is actually about. A block missing any
+/// of them is not a gRPC call and gets an HTTP status instead of a dispatch.
+fn req_block(
+  enc : HpackEncoder,
+  path : Bytes,
+  extra? : Array[Header] = [],
+) -> Bytes {
+  let headers : Array[Header] = [
+    { name: b":method", value: b"POST", },
+    { name: b":scheme", value: b"http", },
+    { name: b":path", value: path, },
+    { name: b":authority", value: b"localhost", },
+    { name: b"content-type", value: b"application/grpc", },
+    { name: b"te", value: b"trailers", },
+  ]
+  for h in extra {
+    headers.push(h)
+  }
+  enc.encode(headers)
+}
+
+///|
 test "engine: a unary request dispatches and is framed as HEADERS + DATA + trailers" {
   let engine = H2Server::new()
   engine.register("/echo.Echo/Say", req => concat(b"echo:", req))
@@ -107,7 +130,7 @@ test "engine: SETTINGS is acknowledged; PING is answered" {
 test "engine: an unknown method gets a trailers-only UNIMPLEMENTED response" {
   let engine = H2Server::new()
   let enc = HpackEncoder::new()
-  let block = enc.encode([{ name: b":path", value: b"/nope.Svc/Method", }])
+  let block = req_block(enc, b"/nope.Svc/Method")
   let _ = engine.feed(Settings(params=[], ack=false))
   let out = engine.feed(
     Headers(
@@ -156,7 +179,7 @@ test "engine: a small send window splits the reply and a WINDOW_UPDATE releases 
   // a 20-byte reply, larger than the window we advertise.
   engine.register("/big.Svc/M", _req => b"0123456789ABCDEFGHIJ")
   let enc = HpackEncoder::new()
-  let block = enc.encode([{ name: b":path", value: b"/big.Svc/M", }])
+  let block = req_block(enc, b"/big.Svc/M")
   // peer advertises a tiny 5-octet initial window before opening the stream.
   let _ = engine.feed(
     Settings(params=[(settings_initial_window_size, 5)], ack=false),
@@ -216,8 +239,7 @@ test "engine: a compressed request under an unsupported encoding gets UNIMPLEMEN
   let engine = H2Server::new()
   engine.register("/echo.Echo/Say", req => req)
   let enc = HpackEncoder::new()
-  let block = enc.encode([
-    { name: b":path", value: b"/echo.Echo/Say", },
+  let block = req_block(enc, b"/echo.Echo/Say", extra=[
     { name: b"grpc-encoding", value: b"snappy", },
   ])
   let _ = engine.feed(Settings(params=[], ack=false))
@@ -267,7 +289,7 @@ test "add_window saturates at 2^31-1 instead of wrapping negative" {
 test "engine: a CONTINUATION past the header-size cap is rejected, not buffered forever" {
   let engine = H2Server::new()
   let enc = HpackEncoder::new()
-  let block = enc.encode([{ name: b":path", value: b"/e.E/M", }])
+  let block = req_block(enc, b"/e.E/M")
   let _ = engine.feed(Settings(params=[], ack=false))
   let _ = engine.feed(
     Headers(
@@ -299,7 +321,7 @@ test "engine: a HEADERS on an even (server-initiated) stream id is a protocol er
   let engine = H2Server::new()
   engine.register("/e.E/M", req => req)
   let enc = HpackEncoder::new()
-  let block = enc.encode([{ name: b":path", value: b"/e.E/M", }])
+  let block = req_block(enc, b"/e.E/M")
   let _ = engine.feed(Settings(params=[], ack=false))
   // Stream id 2 is even, so server-initiated — a client must not open it.
   let out = engine.feed(
@@ -325,7 +347,7 @@ test "engine: a message length prefix past the cap gets RESOURCE_EXHAUSTED, not 
   let engine = H2Server::new()
   engine.register("/echo.Echo/Say", req => req)
   let enc = HpackEncoder::new()
-  let block = enc.encode([{ name: b":path", value: b"/echo.Echo/Say", }])
+  let block = req_block(enc, b"/echo.Echo/Say")
   let _ = engine.feed(Settings(params=[], ack=false))
   let _ = engine.feed(
     Headers(
@@ -367,8 +389,7 @@ test "engine: a gzip-compressed request is inflated and reaches the handler" {
   // equals the original plaintext, not the gzip bytes.
   engine.register("/echo.Echo/Say", req => req)
   let enc = HpackEncoder::new()
-  let block = enc.encode([
-    { name: b":path", value: b"/echo.Echo/Say", },
+  let block = req_block(enc, b"/echo.Echo/Say", extra=[
     { name: b"grpc-encoding", value: b"gzip", },
   ])
   let _ = engine.feed(Settings(params=[], ack=false))
@@ -491,7 +512,7 @@ fn call_once(
   path : Bytes,
   body : Bytes,
 ) -> Bytes raise {
-  let block = enc.encode([{ name: b":path", value: path, }])
+  let block = req_block(enc, path)
   let _ = engine.feed(
     Headers(
       stream_id=id,
@@ -603,6 +624,8 @@ test "engine: a CONTINUATION with no field block open is a connection error" {
     _ => abort("expected GOAWAY")
   }
   assert_eq(engine.closing(), true)
+  // And it opened nothing on the way: a stream nobody sent HEADERS for stays idle.
+  assert_eq(engine.stream_state(1), Idle)
 }
 
 ///|
@@ -661,7 +684,7 @@ test "engine: a stream opened after our own GOAWAY is refused, not served" {
   assert_eq(call_once(engine, enc, dec, 1, b"/e.E/M", b"hhh") == b"0", true)
   // The drain names stream 1 as the last one we will handle.
   let _ = engine.goaway(engine.highest_stream())
-  let block = enc.encode([{ name: b":path", value: b"/e.E/M", }])
+  let block = req_block(enc, b"/e.E/M")
   let out = engine.feed(
     Headers(
       stream_id=3,
@@ -691,7 +714,7 @@ test "engine: a reset stream stops mid-call and sends nothing more" {
   let enc = HpackEncoder::new()
   let dec = HpackDecoder::new()
   let _ = engine.feed(Settings(params=[], ack=false))
-  let block = enc.encode([{ name: b":path", value: b"/e.E/M", }])
+  let block = req_block(enc, b"/e.E/M")
   let _ = engine.feed(
     Headers(
       stream_id=1,
@@ -731,20 +754,15 @@ test "engine: a reset stream stops mid-call and sends nothing more" {
 }
 
 ///|
-/// A peer's RST_STREAM has to clear the half-read header block, not just mark the
-/// stream closed. A CONTINUATION arriving afterwards is the peer's protocol error —
-/// it is continuing a block on a stream it just reset — and blaming ourselves with
-/// INTERNAL_ERROR would send the wrong diagnostic to the wrong side.
-test "a peer's RST_STREAM abandons the header block it was in the middle of" {
+/// §6.10 makes a field block a contiguous run: a peer cannot even abandon one by
+/// resetting the stream, because the RST_STREAM is itself a frame interleaved into the
+/// block. The fault is the peer's, and the GOAWAY has to say so rather than blame us
+/// with INTERNAL_ERROR from somewhere further down.
+test "a peer's RST_STREAM inside an open field block ends the connection" {
   let e = H2Server::new()
   e.register("/echo.E/Say", req => req)
   let enc = HpackEncoder::new()
-  let block = enc.encode([
-    { name: b":method", value: b"POST", },
-    { name: b":scheme", value: b"http", },
-    { name: b":path", value: b"/echo.E/Say", },
-    { name: b"content-type", value: b"application/grpc", },
-  ])
+  let block = req_block(enc, b"/echo.E/Say")
   let _ = e.feed(Settings(params=[], ack=false))
   // Open a block and deliberately leave it open.
   let _ = e.feed(
@@ -757,17 +775,642 @@ test "a peer's RST_STREAM abandons the header block it was in the middle of" {
       padding=0,
     ),
   )
-  let _ = e.feed(RstStream(stream_id=1, error_code=error_cancel))
-  assert_eq(e.stream_state(1), StreamState::Closed)
-  // Continuing the abandoned block is the peer's fault, and the GOAWAY has to say so.
-  let after = e.feed(
-    Continuation(stream_id=1, fragment=block, end_headers=true),
-  )
+  let out = e.feed(RstStream(stream_id=1, error_code=error_cancel))
   let mut code = -1
-  for f in after {
+  for f in out {
     if f is GoAway(error_code~, ..) {
       code = error_code
     }
   }
   assert_eq(code, error_protocol_error)
+  assert_eq(e.closing(), true)
+}
+
+// -- deadlines, the request line, and the connection's limits ----------------
+
+///|
+test "engine: a handler that outruns its deadline gets DEADLINE_EXCEEDED, not its reply" {
+  let engine = H2Server::new()
+  let now = Ref(0L)
+  engine.set_clock(() => now.val)
+  // The call is given two seconds and the handler spends five of them.
+  engine.register_unary("/slow.S/Wait", (_ctx, req) => {
+    now.val = now.val + 5000L
+    concat(b"late:", req)
+  })
+  let enc = HpackEncoder::new()
+  let dec = HpackDecoder::new()
+  let block = req_block(enc, b"/slow.S/Wait", extra=[
+    { name: b"grpc-timeout", value: b"2S", },
+  ])
+  let _ = engine.feed(Settings(params=[], ack=false))
+  let out = engine.feed(
+    Headers(
+      stream_id=1,
+      fragment=block,
+      end_stream=true,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  // Trailers only: the reply the handler produced after the deadline never goes out.
+  assert_eq(out.length(), 1)
+  let mut status = b""
+  let mut body = 0
+  for f in out {
+    match f {
+      Headers(fragment~, end_stream~, ..) => {
+        assert_eq(end_stream, true)
+        for h in dec.decode(fragment) {
+          if h.name == b"grpc-status" {
+            status = h.value
+          }
+        }
+      }
+      Data(data~, ..) => body = body + data.length()
+      _ => ()
+    }
+  }
+  // 4 == DEADLINE_EXCEEDED.
+  assert_eq(status == b"4", true)
+  assert_eq(body, 0)
+  assert_eq(engine.stream_state(1), Closed)
+}
+
+///|
+test "engine: tick expires a call that runs out of time waiting, and stops the client" {
+  let engine = H2Server::new()
+  let now = Ref(0L)
+  engine.set_clock(() => now.val)
+  engine.register_client_streaming("/slow.S/Collect", (_ctx, msgs) => {
+    int_to_ascii_bytes(msgs.length())
+  })
+  let enc = HpackEncoder::new()
+  let dec = HpackDecoder::new()
+  let block = req_block(enc, b"/slow.S/Collect", extra=[
+    { name: b"grpc-timeout", value: b"1S", },
+  ])
+  let _ = engine.feed(Settings(params=[], ack=false))
+  // The client opens the call and then goes quiet without ever half-closing.
+  let _ = engine.feed(
+    Headers(
+      stream_id=1,
+      fragment=block,
+      end_stream=false,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  assert_eq(engine.tick().length(), 0)
+  now.val = 1000L
+  let out = engine.tick()
+  // The DEADLINE_EXCEEDED trailers, then a RST_STREAM: trailers alone would leave the
+  // stream half-open with the client still free to send into it.
+  assert_eq(out.length(), 2)
+  let mut status = b""
+  match out[0] {
+    Headers(fragment~, end_stream~, ..) => {
+      assert_eq(end_stream, true)
+      for h in dec.decode(fragment) {
+        if h.name == b"grpc-status" {
+          status = h.value
+        }
+      }
+    }
+    _ => abort("expected the trailer HEADERS")
+  }
+  assert_eq(status == b"4", true)
+  match out[1] {
+    RstStream(stream_id~, error_code~) => {
+      assert_eq(stream_id, 1)
+      assert_eq(error_code, error_no_error)
+    }
+    _ => abort("expected RST_STREAM")
+  }
+  assert_eq(engine.stream_state(1), Closed)
+  assert_eq(engine.active_streams(), 0)
+  // Nothing is left to expire.
+  assert_eq(engine.tick().length(), 0)
+}
+
+///|
+test "engine: a call inside its deadline is served normally" {
+  let engine = H2Server::new()
+  let now = Ref(0L)
+  engine.set_clock(() => now.val)
+  engine.register("/quick.S/Go", req => concat(b"ok:", req))
+  let enc = HpackEncoder::new()
+  let dec = HpackDecoder::new()
+  let block = req_block(enc, b"/quick.S/Go", extra=[
+    { name: b"grpc-timeout", value: b"2S", },
+  ])
+  let _ = engine.feed(Settings(params=[], ack=false))
+  let _ = engine.feed(
+    Headers(
+      stream_id=1,
+      fragment=block,
+      end_stream=false,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  now.val = 1999L
+  let out = engine.feed(
+    Data(stream_id=1, data=encode_message(b"qwq"), end_stream=true, padding=0),
+  )
+  // HEADERS, DATA, trailers — the reply, not a deadline.
+  assert_eq(out.length(), 3)
+  let mut status = b""
+  for f in out {
+    if f is Headers(fragment~, ..) {
+      for h in dec.decode(fragment) {
+        if h.name == b"grpc-status" {
+          status = h.value
+        }
+      }
+    }
+  }
+  assert_eq(status == b"0", true)
+}
+
+///|
+/// Feed `headers` to a fresh engine as one complete request and return the `:status` of
+/// the response, so a test can say which requests are gRPC calls and which are not.
+fn status_of(headers : Array[Header]) -> Bytes raise {
+  let engine = H2Server::new()
+  engine.register("/echo.Echo/Say", req => req)
+  let enc = HpackEncoder::new()
+  let dec = HpackDecoder::new()
+  let _ = engine.feed(Settings(params=[], ack=false))
+  let out = engine.feed(
+    Headers(
+      stream_id=1,
+      fragment=enc.encode(headers),
+      end_stream=true,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  let mut status = b""
+  for f in out {
+    if f is Headers(fragment~, ..) {
+      for h in dec.decode(fragment) {
+        if h.name == b":status" {
+          status = h.value
+        }
+      }
+    }
+  }
+  status
+}
+
+///|
+test "engine: a request that is not a gRPC call is refused with 415, not served" {
+  let engine = H2Server::new()
+  engine.register("/echo.Echo/Say", req => req)
+  let enc = HpackEncoder::new()
+  let dec = HpackDecoder::new()
+  let _ = engine.feed(Settings(params=[], ack=false))
+  // A browser form post aimed at the gRPC path: right method, wrong media type.
+  let block = enc.encode([
+    { name: b":method", value: b"POST", },
+    { name: b":scheme", value: b"http", },
+    { name: b":path", value: b"/echo.Echo/Say", },
+    { name: b"content-type", value: b"application/x-www-form-urlencoded", },
+    { name: b"te", value: b"trailers", },
+  ])
+  let out = engine.feed(
+    Headers(
+      stream_id=1,
+      fragment=block,
+      end_stream=true,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  assert_eq(out.length(), 1)
+  let mut status = b""
+  let mut grpc_status = b""
+  match out[0] {
+    Headers(fragment~, end_stream~, ..) => {
+      assert_eq(end_stream, true)
+      for h in dec.decode(fragment) {
+        if h.name == b":status" {
+          status = h.value
+        }
+        if h.name == b"grpc-status" {
+          grpc_status = h.value
+        }
+      }
+    }
+    _ => abort("expected a HEADERS frame")
+  }
+  // 415, not the 200 a gRPC call carries — an HTTP client would read that as success.
+  assert_eq(status == b"415", true)
+  assert_eq(grpc_status == b"3", true)
+  assert_eq(engine.stream_state(1), Closed)
+  // The connection is fine; only this request was not a call.
+  assert_eq(engine.closing(), false)
+}
+
+///|
+test "engine: PROTOCOL-HTTP2's request line is enforced, not assumed" {
+  // A health-checking GET, even with the right content type, is not a call.
+  assert_eq(
+    status_of([
+      { name: b":method", value: b"GET", },
+      { name: b":path", value: b"/echo.Echo/Say", },
+      { name: b"content-type", value: b"application/grpc", },
+      { name: b"te", value: b"trailers", },
+    ]) ==
+    b"405",
+    true,
+  )
+  // `te: trailers` is how a client says it can read the trailers the status rides in.
+  assert_eq(
+    status_of([
+      { name: b":method", value: b"POST", },
+      { name: b":path", value: b"/echo.Echo/Say", },
+      { name: b"content-type", value: b"application/grpc", },
+    ]) ==
+    b"400",
+    true,
+  )
+  // The subtype suffix the spec allows is still a gRPC call.
+  assert_eq(
+    status_of([
+      { name: b":method", value: b"POST", },
+      { name: b":path", value: b"/echo.Echo/Say", },
+      { name: b"content-type", value: b"application/grpc+proto", },
+      { name: b"te", value: b"trailers", },
+    ]) ==
+    b"200",
+    true,
+  )
+}
+
+///|
+/// Open a call on stream `id` and leave it running — HEADERS without END_STREAM, so the
+/// stream stays open and counts against the concurrency limit.
+fn open_stream(engine : H2Server, enc : HpackEncoder, id : Int) -> Array[Frame] {
+  engine.feed(
+    Headers(
+      stream_id=id,
+      fragment=req_block(enc, b"/e.E/M"),
+      end_stream=false,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+}
+
+///|
+test "engine: one stream over the advertised limit is refused, not served" {
+  let engine = H2Server::new()
+  engine.register("/e.E/M", req => req)
+  engine.set_max_streams(2)
+  let enc = HpackEncoder::new()
+  // The peer is told the limit before it can exceed it.
+  let mut advertised = -1
+  for f in engine.preface() {
+    if f is Settings(params~, ..) {
+      for p in params {
+        if p.0 == settings_max_concurrent_streams {
+          advertised = p.1
+        }
+      }
+    }
+  }
+  assert_eq(advertised, 2)
+  let _ = engine.feed(Settings(params=[], ack=false))
+  assert_eq(open_stream(engine, enc, 1).length(), 0)
+  // A WINDOW_UPDATE naming a stream nobody opened must not eat one of the two slots.
+  let _ = engine.feed(WindowUpdate(stream_id=99, increment=100))
+  assert_eq(engine.active_streams(), 1)
+  assert_eq(open_stream(engine, enc, 3).length(), 0)
+  assert_eq(engine.active_streams(), 2)
+  // The third is one too many.
+  let out = open_stream(engine, enc, 5)
+  assert_eq(out.length(), 1)
+  match out[0] {
+    RstStream(stream_id~, error_code~) => {
+      assert_eq(stream_id, 5)
+      // §5.1.2: refused, which tells the client it was never processed.
+      assert_eq(error_code, error_refused_stream)
+    }
+    _ => abort("expected RST_STREAM")
+  }
+  // Never processed means no state was created for it at all.
+  assert_eq(engine.stream_state(5), Idle)
+  assert_eq(engine.active_streams(), 2)
+  assert_eq(engine.closing(), false)
+  // Finishing one call frees its slot, and the refused stream is welcome then.
+  let _ = engine.feed(
+    Data(stream_id=1, data=encode_message(b"hhh"), end_stream=true, padding=0),
+  )
+  assert_eq(engine.active_streams(), 1)
+  assert_eq(open_stream(engine, enc, 5).length(), 0)
+  assert_eq(engine.active_streams(), 2)
+}
+
+///|
+/// A DATA payload of `n` octets that reads as the opening of one gRPC message far longer
+/// than that (4 000 000 octets, under the receive cap), so the engine buffers it instead
+/// of dispatching a call — the payload is the flow-control test's subject, not a request.
+fn partial_message(n : Int) -> Bytes {
+  let buf = Buffer()
+  buf.write_byte(0)
+  buf.write_byte(0)
+  buf.write_byte(0x3D)
+  buf.write_byte(0x09)
+  buf.write_byte(0)
+  for i = 5; i < n; i = i + 1 {
+    buf.write_byte(b'q')
+  }
+  buf.to_bytes()
+}
+
+///|
+test "engine: DATA past the connection receive window is a FLOW_CONTROL_ERROR" {
+  let engine = H2Server::new()
+  engine.register("/e.E/M", req => req)
+  let enc = HpackEncoder::new()
+  let _ = engine.feed(Settings(params=[], ack=false))
+  let _ = open_stream(engine, enc, 1)
+  // One octet more than the 65535 we advertised: the peer is not doing flow control,
+  // which is not something a receiver can absorb.
+  let out = engine.feed(
+    Data(
+      stream_id=1,
+      data=partial_message(default_window_size + 1),
+      end_stream=false,
+      padding=0,
+    ),
+  )
+  assert_eq(out.length(), 1)
+  match out[0] {
+    GoAway(error_code~, ..) => assert_eq(error_code, error_flow_control_error)
+    _ => abort("expected GOAWAY")
+  }
+  assert_eq(engine.closing(), true)
+}
+
+///|
+test "engine: DATA past one stream's window resets it and hands the connection its credit back" {
+  let engine = H2Server::new()
+  engine.register("/e.E/M", req => req)
+  let enc = HpackEncoder::new()
+  let _ = engine.feed(Settings(params=[], ack=false))
+  let _ = open_stream(engine, enc, 1)
+  let _ = open_stream(engine, enc, 3)
+  // 20 000 octets each: the connection window falls to 25 535 and is replenished to
+  // 65 535, while both stream windows stay at 45 535.
+  let _ = engine.feed(
+    Data(stream_id=1, data=partial_message(20000), end_stream=false, padding=0),
+  )
+  let _ = engine.feed(
+    Data(stream_id=3, data=partial_message(20000), end_stream=false, padding=0),
+  )
+  // 50 000 more on stream 1 fits the connection window but overruns that stream's.
+  let out = engine.feed(
+    Data(stream_id=1, data=partial_message(50000), end_stream=false, padding=0),
+  )
+  assert_eq(out.length(), 2)
+  match out[0] {
+    WindowUpdate(stream_id~, increment~) => {
+      assert_eq(stream_id, 0)
+      assert_eq(increment, 50000)
+    }
+    _ => abort("expected a connection WINDOW_UPDATE")
+  }
+  match out[1] {
+    RstStream(stream_id~, error_code~) => {
+      assert_eq(stream_id, 1)
+      assert_eq(error_code, error_flow_control_error)
+    }
+    _ => abort("expected RST_STREAM")
+  }
+  assert_eq(engine.closing(), false)
+  assert_eq(engine.stream_state(1), Closed)
+  // §6.9.1: octets on a stream we no longer track still count against the connection
+  // window the peer spent them from, so they are still credited back.
+  let late = engine.feed(
+    Data(stream_id=1, data=partial_message(40000), end_stream=false, padding=0),
+  )
+  assert_eq(late.length(), 2)
+  match late[0] {
+    WindowUpdate(stream_id~, increment~) => {
+      assert_eq(stream_id, 0)
+      assert_eq(increment, 40000)
+    }
+    _ => abort("expected a connection WINDOW_UPDATE")
+  }
+  match late[1] {
+    RstStream(error_code~, ..) => assert_eq(error_code, error_stream_closed)
+    _ => abort("expected RST_STREAM")
+  }
+  // Stream 3 never noticed any of it.
+  assert_eq(engine.active_streams(), 1)
+}
+
+///|
+/// Open a field block on stream 1 and leave it open, then feed `intruder` into the
+/// middle of it and return what comes back.
+fn interleave(intruder : Frame) -> Array[Frame] {
+  let engine = H2Server::new()
+  engine.register("/e.E/M", req => req)
+  let enc = HpackEncoder::new()
+  let _ = engine.feed(Settings(params=[], ack=false))
+  let _ = engine.feed(
+    Headers(
+      stream_id=1,
+      fragment=req_block(enc, b"/e.E/M"),
+      end_stream=false,
+      end_headers=false,
+      priority=None,
+      padding=0,
+    ),
+  )
+  engine.feed(intruder)
+}
+
+///|
+test "engine: any frame interleaved into an open field block ends the connection" {
+  // §6.10: a field block is a contiguous run of frames. Nothing may come between a
+  // HEADERS and its CONTINUATION — not on this stream, not on another one.
+  let intruders : Array[Frame] = [
+    Data(stream_id=1, data=b"qwq", end_stream=false, padding=0),
+    WindowUpdate(stream_id=1, increment=100),
+    Ping(payload=b"heke1228", ack=false),
+    Continuation(stream_id=3, fragment=b"", end_headers=true),
+  ]
+  for intruder in intruders {
+    let out = interleave(intruder)
+    assert_eq(out.length(), 1)
+    match out[0] {
+      GoAway(error_code~, debug~, ..) => {
+        assert_eq(error_code, error_protocol_error)
+        assert_eq(debug == b"frame interleaved into an open field block", true)
+      }
+      _ => abort("expected GOAWAY")
+    }
+  }
+}
+
+///|
+test "engine: a request header block split across HEADERS + CONTINUATION is served" {
+  let engine = H2Server::new()
+  engine.register("/e.E/M", req => concat(b"re:", req))
+  let enc = HpackEncoder::new()
+  let dec = HpackDecoder::new()
+  let block = req_block(enc, b"/e.E/M")
+  let _ = engine.feed(Settings(params=[], ack=false))
+  let half = block.length() / 2
+  let _ = engine.feed(
+    Headers(
+      stream_id=1,
+      fragment=block[0:half].to_owned(),
+      end_stream=false,
+      end_headers=false,
+      priority=None,
+      padding=0,
+    ),
+  )
+  let _ = engine.feed(
+    Continuation(
+      stream_id=1,
+      fragment=block[half:block.length()].to_owned(),
+      end_headers=true,
+    ),
+  )
+  // END_HEADERS closed the block, so the DATA that follows is not an interleaving.
+  let out = engine.feed(
+    Data(stream_id=1, data=encode_message(b"qwq"), end_stream=true, padding=0),
+  )
+  assert_eq(out.length(), 3)
+  let mut status = b""
+  for f in out {
+    if f is Headers(fragment~, ..) {
+      for h in dec.decode(fragment) {
+        if h.name == b"grpc-status" {
+          status = h.value
+        }
+      }
+    }
+  }
+  assert_eq(status == b"0", true)
+  assert_eq(engine.stream_state(1), Closed)
+}
+
+///|
+test "engine: a call already out of time when the request lands never reaches the handler" {
+  let engine = H2Server::new()
+  let now = Ref(0L)
+  engine.set_clock(() => now.val)
+  let ran = Ref(false)
+  engine.register("/slow.S/Wait", req => {
+    ran.val = true
+    req
+  })
+  let enc = HpackEncoder::new()
+  let dec = HpackDecoder::new()
+  let block = req_block(enc, b"/slow.S/Wait", extra=[
+    { name: b"grpc-timeout", value: b"2S", },
+  ])
+  let _ = engine.feed(Settings(params=[], ack=false))
+  let _ = engine.feed(
+    Headers(
+      stream_id=1,
+      fragment=block,
+      end_stream=false,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  // The client took longer than the call had to send the rest of the request.
+  now.val = 2000L
+  let out = engine.feed(
+    Data(stream_id=1, data=encode_message(b"qwq"), end_stream=true, padding=0),
+  )
+  assert_eq(out.length(), 1)
+  let mut status = b""
+  match out[0] {
+    Headers(fragment~, ..) =>
+      for h in dec.decode(fragment) {
+        if h.name == b"grpc-status" {
+          status = h.value
+        }
+      }
+    _ => abort("expected the trailer HEADERS")
+  }
+  assert_eq(status == b"4", true)
+  // The handler is never asked to do work for a call that is already over.
+  assert_eq(ran.val, false)
+  assert_eq(engine.stream_state(1), Closed)
+}
+
+///|
+test "engine: a WINDOW_UPDATE cannot nudge a call along after its deadline" {
+  let engine = H2Server::new()
+  let now = Ref(0L)
+  engine.set_clock(() => now.val)
+  engine.register_server_streaming("/big.S/Stream", (_ctx, _req) => {
+    [b"0123456789ABCDEFGHIJ"]
+  })
+  let enc = HpackEncoder::new()
+  let dec = HpackDecoder::new()
+  let block = req_block(enc, b"/big.S/Stream", extra=[
+    { name: b"grpc-timeout", value: b"2S", },
+  ])
+  // A 5-octet send window: the response HEADERS and five octets of body get out and the
+  // rest waits on a WINDOW_UPDATE.
+  let _ = engine.feed(
+    Settings(params=[(settings_initial_window_size, 5)], ack=false),
+  )
+  let first = engine.feed(
+    Headers(
+      stream_id=1,
+      fragment=block,
+      end_stream=true,
+      end_headers=true,
+      priority=None,
+      padding=0,
+    ),
+  )
+  assert_eq(first.length(), 2)
+  // The window opens again, but only after the call has run out of time.
+  now.val = 2000L
+  let out = engine.feed(WindowUpdate(stream_id=1, increment=1000))
+  let mut octets = 0
+  let mut status = b""
+  let mut restated_http_status = false
+  for f in out {
+    match f {
+      Data(data~, ..) => octets = octets + data.length()
+      Headers(fragment~, ..) =>
+        for h in dec.decode(fragment) {
+          if h.name == b"grpc-status" {
+            status = h.value
+          }
+          if h.name == b":status" {
+            restated_http_status = true
+          }
+        }
+      _ => ()
+    }
+  }
+  // The status, and not the rest of the body the handler had already produced.
+  assert_eq(octets, 0)
+  assert_eq(status == b"4", true)
+  // These are closing trailers, not a second response head: the `:status` went out with
+  // the response HEADERS and saying it twice is not a response at all.
+  assert_eq(restated_http_status, false)
+  assert_eq(engine.stream_state(1), Closed)
 }
